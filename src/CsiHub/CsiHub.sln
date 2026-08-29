@@ -1,4 +1,4 @@
-
+﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CsiHub.Web", "CsiHub.Web\CsiHub.Web.csproj", "{4F7D21B3-493A-400C-83C2-C19104489791}"
 EndProject
@@ -9,6 +9,8 @@ EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CsiHub.Core.Tests", "CsiHub.Core.Tests\CsiHub.Core.Tests.csproj", "{4FA1DA31-60BA-4975-A3AE-F10774A37ECF}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CsiHub.Ingestion.Tests", "CsiHub.Ingestion.Tests\CsiHub.Ingestion.Tests.csproj", "{9F6D1B04-68C5-486B-BFE0-F38069ED792F}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CsiHub.Ingestion.IntegrationTests", "CsiHub.Ingestion.IntegrationTests\CsiHub.Ingestion.IntegrationTests.csproj", "{0B367293-2FDE-4B59-8593-972B2E4F020C}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -80,6 +82,18 @@ Global
 		{9F6D1B04-68C5-486B-BFE0-F38069ED792F}.Release|x64.Build.0 = Release|Any CPU
 		{9F6D1B04-68C5-486B-BFE0-F38069ED792F}.Release|x86.ActiveCfg = Release|Any CPU
 		{9F6D1B04-68C5-486B-BFE0-F38069ED792F}.Release|x86.Build.0 = Release|Any CPU
+		{0B367293-2FDE-4B59-8593-972B2E4F020C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0B367293-2FDE-4B59-8593-972B2E4F020C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0B367293-2FDE-4B59-8593-972B2E4F020C}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{0B367293-2FDE-4B59-8593-972B2E4F020C}.Debug|x64.Build.0 = Debug|Any CPU
+		{0B367293-2FDE-4B59-8593-972B2E4F020C}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{0B367293-2FDE-4B59-8593-972B2E4F020C}.Debug|x86.Build.0 = Debug|Any CPU
+		{0B367293-2FDE-4B59-8593-972B2E4F020C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0B367293-2FDE-4B59-8593-972B2E4F020C}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0B367293-2FDE-4B59-8593-972B2E4F020C}.Release|x64.ActiveCfg = Release|Any CPU
+		{0B367293-2FDE-4B59-8593-972B2E4F020C}.Release|x64.Build.0 = Release|Any CPU
+		{0B367293-2FDE-4B59-8593-972B2E4F020C}.Release|x86.ActiveCfg = Release|Any CPU
+		{0B367293-2FDE-4B59-8593-972B2E4F020C}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

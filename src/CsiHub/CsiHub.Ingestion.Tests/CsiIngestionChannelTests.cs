@@ -64,4 +64,27 @@ public class CsiIngestionChannelTests
 
         Assert.Equal(new[] { "1", "2", "3" }, types);
     }
+
+    [Fact]
+    public void High_Rate_Payload_Channel_Drops_Oldest_Without_Throwing()
+    {
+        const int capacity = 16;
+        const int publishCount = 1000;
+        var channel = CreateChannel(payloadCapacity: capacity);
+
+        for (int i = 0; i < publishCount; i++)
+        {
+            Assert.True(channel.TryPublish(new NodePayload { Type = i.ToString() }));
+        }
+
+        var types = new List<string?>();
+        while (channel.PayloadReader.TryRead(out var payload))
+        {
+            types.Add(payload!.Type);
+        }
+
+        // Only the most recent 'capacity' items should remain.
+        Assert.Equal(capacity, types.Count);
+        Assert.Equal(Enumerable.Range(publishCount - capacity, capacity).Select(i => i.ToString()), types);
+    }
 }

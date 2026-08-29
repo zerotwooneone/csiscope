@@ -1,6 +1,5 @@
 using System.Buffers;
 using System.IO.Pipelines;
-using System.IO.Ports;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
@@ -11,7 +10,7 @@ using Microsoft.Extensions.Logging;
 namespace CsiHub.Ingestion.Pipelines;
 
 /// <summary>
-/// One serial-port pipeline reader and writer. Wraps <see cref="SerialPort.BaseStream"/> with
+/// One serial-port pipeline reader and writer. Wraps an <see cref="ISerialPort.BaseStream"/> with
 /// <see cref="PipeReader"/> to parse NDJSON lines in a non-blocking, low-allocation manner,
 /// while a concurrent write loop sends host-to-node NDJSON commands. Disconnects are
 /// published as state events and trigger a graceful reconnect.
@@ -22,7 +21,7 @@ public sealed class SerialPipelineReader
     private static readonly byte[] NewLineBytes = Encoding.UTF8.GetBytes("\n");
 
     private readonly string _portName;
-    private readonly int _baudRate;
+    private readonly Func<ISerialPort> _portFactory;
     private readonly int _reconnectDelayMs;
     private readonly CsiIngestionChannel _channel;
     private readonly ILogger _logger;
@@ -33,14 +32,14 @@ public sealed class SerialPipelineReader
 
     public SerialPipelineReader(
         string portName,
-        int baudRate,
-        int reconnectDelayMs,
+        Func<ISerialPort> portFactory,
         int commandChannelCapacity,
+        int reconnectDelayMs,
         CsiIngestionChannel channel,
         ILogger logger)
     {
         _portName = portName;
-        _baudRate = baudRate;
+        _portFactory = portFactory;
         _reconnectDelayMs = reconnectDelayMs;
         _channel = channel;
         _logger = logger;
@@ -83,6 +82,7 @@ public sealed class SerialPipelineReader
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+                PublishState(NodeConnectionState.Disconnected);
                 break;
             }
             catch (Exception ex)
@@ -111,30 +111,19 @@ public sealed class SerialPipelineReader
 
     private async Task RunOnceAsync(CancellationToken cancellationToken)
     {
-        using var serialPort = new SerialPort(_portName, _baudRate)
-        {
-            Parity = Parity.None,
-            DataBits = 8,
-            StopBits = StopBits.One,
-            Handshake = Handshake.None,
-            DtrEnable = true,
-            RtsEnable = true,
-            ReadTimeout = -1,
-            WriteTimeout = -1
-        };
+        using var port = _portFactory();
 
-        serialPort.Open();
+        port.Open();
 
         _logger.LogInformation(
-            "Opened serial port {Port} at {Baud} baud.",
-            _portName,
-            _baudRate);
+            "Opened serial port {Port}.",
+            _portName);
 
         // The node is physically present; assume it is in standby until it reports otherwise.
         PublishState(NodeConnectionState.Standby);
 
         var reader = PipeReader.Create(
-            serialPort.BaseStream,
+            port.BaseStream,
             new StreamPipeReaderOptions(
                 pool: MemoryPool<byte>.Shared,
                 bufferSize: 4096,
@@ -152,9 +141,9 @@ public sealed class SerialPipelineReader
             {
                 try
                 {
-                    if (serialPort.IsOpen)
+                    if (port.IsOpen)
                     {
-                        serialPort.Close();
+                        port.Close();
                     }
                 }
                 catch
@@ -163,7 +152,7 @@ public sealed class SerialPipelineReader
                 }
             });
 
-            Task writeLoop = RunWriteLoopAsync(serialPort, cancellationToken);
+            Task writeLoop = RunWriteLoopAsync(port, cancellationToken);
 
             try
             {
@@ -229,9 +218,9 @@ public sealed class SerialPipelineReader
 
                 reader.Complete();
 
-                if (serialPort.IsOpen)
+                if (port.IsOpen)
                 {
-                    serialPort.Close();
+                    port.Close();
                 }
             }
         }
@@ -241,7 +230,7 @@ public sealed class SerialPipelineReader
         }
     }
 
-    private async Task RunWriteLoopAsync(SerialPort serialPort, CancellationToken cancellationToken)
+    private async Task RunWriteLoopAsync(ISerialPort port, CancellationToken cancellationToken)
     {
         try
         {
@@ -256,8 +245,9 @@ public sealed class SerialPipelineReader
 
                 try
                 {
-                    await serialPort.BaseStream.WriteAsync(command.AsMemory(), cancellationToken).ConfigureAwait(false);
-                    await serialPort.BaseStream.WriteAsync(NewLineBytes.AsMemory(), cancellationToken).ConfigureAwait(false);
+                    await port.BaseStream.WriteAsync(command.AsMemory(), cancellationToken).ConfigureAwait(false);
+                    await port.BaseStream.WriteAsync(NewLineBytes.AsMemory(), cancellationToken).ConfigureAwait(false);
+                    await port.BaseStream.FlushAsync(cancellationToken).ConfigureAwait(false);
                 }
                 catch (IOException) when (cancellationToken.IsCancellationRequested)
                 {

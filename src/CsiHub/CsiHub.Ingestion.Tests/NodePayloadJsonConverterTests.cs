@@ -34,6 +34,45 @@ public class NodePayloadJsonConverterTests
     }
 
     [Fact]
+    public void Can_Parse_Heartbeat_Only_Type()
+    {
+        const string json = """{"type":"hb"}""";
+
+        var payload = JsonSerializer.Deserialize<NodePayload>(json);
+
+        Assert.NotNull(payload);
+        Assert.Equal("hb", payload.Type);
+    }
+
+    [Fact]
+    public void Can_Parse_Csi_Payload()
+    {
+        const string json = """{"type":"csi","mac":"AA:BB:CC:DD:EE:FF","t":12345,"c":[1.0,2.0,3.0,4.0,5.0]}""";
+
+        var payload = JsonSerializer.Deserialize<NodePayload>(json);
+
+        Assert.NotNull(payload);
+        Assert.Equal("csi", payload.Type);
+        Assert.Equal("AA:BB:CC:DD:EE:FF", payload.Mac);
+        Assert.Equal(12345L, payload.Timestamp);
+        Assert.Equal(new[] { 1.0, 2.0, 3.0, 4.0, 5.0 }, payload.Csi);
+    }
+
+    [Fact]
+    public void Can_Parse_Imu_Payload()
+    {
+        const string json = """{"type":"imu","mac":"AA:BB:CC:DD:EE:FF","t":12345,"i":[0.1,0.2,0.3,0.4]}""";
+
+        var payload = JsonSerializer.Deserialize<NodePayload>(json);
+
+        Assert.NotNull(payload);
+        Assert.Equal("imu", payload.Type);
+        Assert.Equal("AA:BB:CC:DD:EE:FF", payload.Mac);
+        Assert.Equal(12345L, payload.Timestamp);
+        Assert.Equal(new[] { 0.1, 0.2, 0.3, 0.4 }, payload.Imu);
+    }
+
+    [Fact]
     public void Can_Parse_Config_Response()
     {
         const string json = """{"type":"config","mac":"00:11:22:33:44:55","state":"assigned","baud":921600,"version":"0.1.0"}""";

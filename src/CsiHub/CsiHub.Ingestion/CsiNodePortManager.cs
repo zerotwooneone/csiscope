@@ -54,9 +54,9 @@ public sealed class CsiNodePortManager
 
             var reader = new SerialPipelineReader(
                 portName,
-                _options.SerialBaudRate,
-                _options.ReconnectDelayMs,
+                () => new SerialPortAdapter(portName, _options.SerialBaudRate),
                 _options.CommandChannelCapacity,
+                _options.ReconnectDelayMs,
                 _channel,
                 _logger);
 
