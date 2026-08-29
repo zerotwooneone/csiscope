@@ -1,10 +1,13 @@
 using CsiHub.Components;
+using CsiHub.Ingestion;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
+
+builder.Services.AddCsiIngestion(builder.Configuration.GetSection("CsiIngestion"));
 
 var app = builder.Build();
 

@@ -1,0 +1,33 @@
+using System.Text.Json.Serialization;
+
+namespace CsiHub.Ingestion.Models;
+
+/// <summary>
+/// A parsed NDJSON payload from a CsiScope node. Supports both the compact flat-array
+/// keys the firmware emits ("c", "i", "m", "t") and longer debug keys.
+/// </summary>
+[JsonConverter(typeof(Serialization.NodePayloadJsonConverter))]
+public sealed class NodePayload
+{
+    public string? Type { get; set; }
+
+    public string? Mac { get; set; }
+
+    public long? Timestamp { get; set; }
+
+    public string? State { get; set; }
+
+    public double[]? Csi { get; set; }
+
+    public double[]? Imu { get; set; }
+
+    /// <summary>
+    /// The host-local time the payload was received.
+    /// </summary>
+    public DateTimeOffset ReceivedAt { get; set; }
+
+    /// <summary>
+    /// The COM port this payload was ingested from.
+    /// </summary>
+    public string? PortName { get; set; }
+}

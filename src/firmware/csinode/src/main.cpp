@@ -3,6 +3,7 @@
 #include "config.h"
 #include "protocol_types.h"
 #include "HardwareDiagnostics.h"
+#include "SerialManager.h"
 
 // Global State
 SystemState currentState = SystemState::STATE_BOOT;
@@ -21,6 +22,8 @@ void setup()
   {
     delay(10);
   }
+
+  SerialManager::begin();
 
   HardwareDiagnostics::setLedState(currentState);
   nodeMacAddress = HardwareDiagnostics::getMacAddress();
@@ -44,27 +47,26 @@ void loop()
 {
   unsigned long currentMs = millis();
 
-  // Process serial port listener for incoming host commands[cite: 1]
-  if (Serial.available())
-  {
-    // Handle NDJSON parsing and state switching here
-  }
+  // Non-blocking NDJSON command ingestion; never waits inside this call.
+  SerialManager::process();
 
   // State execution matrix
   switch (currentState)
   {
   case SystemState::STATE_STANDBY:
+  case SystemState::STATE_ASSIGNED:
     // Broadcasts a 1Hz heartbeat identifying itself[cite: 1]
     if (currentMs - lastHeartbeatMs >= Config::HEARTBEAT_INTERVAL_MS)
     {
       lastHeartbeatMs = currentMs;
 
       // Formats strict NDJSON heartbeat payload[cite: 1]
-      JsonDocument hbDoc;
+      static JsonDocument hbDoc;
+      hbDoc.clear();
       hbDoc["type"] = "hb";
       hbDoc["mac"] = nodeMacAddress;
-      hbDoc["role"] = "none";
-      hbDoc["state"] = "standby";
+      hbDoc["role"] = SerialManager::roleToString(currentRole);
+      hbDoc["state"] = SerialManager::stateToString(currentState);
       hbDoc["uptime"] = millis() / 1000;
 
       serializeJson(hbDoc, Serial);
