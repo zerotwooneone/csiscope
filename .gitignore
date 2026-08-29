@@ -1,0 +1,36 @@
+# =========================
+# .NET 10 / Host Brain
+# =========================
+[Bb]in/
+[Oo]bj/
+.vs/
+*.user
+*.suo
+*.dbmdl
+*.jfm
+*.pfx
+*.publishsettings
+
+# =========================
+# PlatformIO / Firmware
+# =========================
+.pio/
+.vscode/.pio/
+include/default_envs.h
+
+# =========================
+# Python / Mock Scripts
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+
+# =========================
+# OS & IDE
+# =========================
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
