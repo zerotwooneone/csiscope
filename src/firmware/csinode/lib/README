@@ -44,3 +44,9 @@ libraries by scanning project source files.
 
 More information about PlatformIO Library Dependency Finder
 - https://docs.platformio.org/page/librarymanager/ldf.html
+
+## Deploy
+Use this command in the PlatformIo terminal to deploy to all 3 configured boards (you must ensure the COM ports are correct in platformio.ini)
+```
+pio run -t upload
+```
