@@ -1,4 +1,4 @@
-using CsiHub.Components;
+using CsiHub.Features.Shell;
 using CsiHub.Ingestion;
 
 var builder = WebApplication.CreateBuilder(args);
