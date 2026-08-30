@@ -77,6 +77,7 @@ void loop()
       hbDoc["mac"] = nodeMacAddress;
       hbDoc["state"] = SerialManager::stateToString(currentState);
       hbDoc["uptime"] = millis() / 1000;
+      hbDoc["bw"] = Config::CSI_BANDWIDTH;
       hbDoc["clock_leader"] = SyncManager::isLeader();
       hbDoc["imu_host"] = ImuManager::isHost();
 

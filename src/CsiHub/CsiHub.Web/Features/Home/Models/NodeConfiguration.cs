@@ -10,4 +10,9 @@ public sealed class NodeConfiguration
     public bool ClockLeader { get; set; }
 
     public bool ImuHost { get; set; }
+
+    /// <summary>
+    /// Active Wi-Fi bandwidth in MHz (20 or 40).
+    /// </summary>
+    public int? Bandwidth { get; set; }
 }

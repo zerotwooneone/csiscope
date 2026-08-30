@@ -13,4 +13,5 @@ public sealed record NodeStateChanged(
     long? Uptime = null,
     DateTimeOffset? ReceivedAt = null,
     bool? ClockLeader = null,
-    bool? ImuHost = null);
+    bool? ImuHost = null,
+    int? Bandwidth = null);

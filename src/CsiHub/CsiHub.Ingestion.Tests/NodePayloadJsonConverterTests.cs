@@ -47,6 +47,18 @@ public class NodePayloadJsonConverterTests
     }
 
     [Fact]
+    public void Can_Parse_Heartbeat_Bandwidth()
+    {
+        const string json = """{"type":"hb","mac":"AA:BB:CC:DD:EE:FF","state":"standby","uptime":5,"bw":40,"clock_leader":true,"imu_host":false}""";
+
+        var payload = JsonSerializer.Deserialize<NodePayload>(json);
+
+        Assert.NotNull(payload);
+        Assert.Equal("hb", payload.Type);
+        Assert.Equal(40, payload.Bandwidth);
+    }
+
+    [Fact]
     public void Can_Parse_Error_Payload_With_Param()
     {
         const string json = """{"type":"error","cmd":"set_features","param":"imu_host","reason":"init_failed"}""";

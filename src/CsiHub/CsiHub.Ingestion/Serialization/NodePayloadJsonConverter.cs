@@ -91,6 +91,14 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
                     }
                     break;
 
+                case "bw":
+                case "bandwidth":
+                    if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt32(out var bw))
+                    {
+                        payload.Bandwidth = bw;
+                    }
+                    break;
+
                 case "c":
                 case "csi":
                     payload.Csi = ReadDoubleArray(ref reader);
@@ -211,6 +219,11 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
         if (value.ImuHost.HasValue)
         {
             writer.WriteBoolean("imu_host", value.ImuHost.Value);
+        }
+
+        if (value.Bandwidth.HasValue)
+        {
+            writer.WriteNumber("bw", value.Bandwidth.Value);
         }
 
         if (value.Csi is not null)

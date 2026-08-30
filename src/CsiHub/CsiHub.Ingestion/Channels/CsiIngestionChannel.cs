@@ -8,22 +8,30 @@ namespace CsiHub.Ingestion.Channels;
 /// Singleton ingestion bus. Decouples the high-rate serial RX threads from the DSP
 /// pipeline by publishing parsed payloads and node state changes to
 /// <see cref="System.Threading.Channels.Channel{T}"/> readers.
-/// Payloads are bounded with <see cref="BoundedChannelFullMode.DropOldest"/> so the
-/// DSP pipeline can fall behind without causing an OOM exception.
+/// Payloads are fanned-out to a state-store channel (UI/dashboard) and a DSP channel
+/// (signal processing) so both consumers receive every payload.
 /// </summary>
 public sealed class CsiIngestionChannel
 {
-    private readonly Channel<NodePayload> _payloadChannel;
+    private readonly Channel<NodePayload> _stateStorePayloadChannel;
+    private readonly Channel<NodePayload> _dspPayloadChannel;
     private readonly Channel<NodeStateChanged> _stateChannel;
 
     public CsiIngestionChannel(IOptions<CsiIngestionOptions> options)
     {
         var value = options.Value;
 
-        _payloadChannel = Channel.CreateBounded<NodePayload>(new BoundedChannelOptions(value.PayloadChannelCapacity)
+        _stateStorePayloadChannel = Channel.CreateBounded<NodePayload>(new BoundedChannelOptions(value.PayloadChannelCapacity)
         {
             FullMode = BoundedChannelFullMode.DropOldest,
-            SingleReader = false,
+            SingleReader = true,
+            SingleWriter = false
+        });
+
+        _dspPayloadChannel = Channel.CreateBounded<NodePayload>(new BoundedChannelOptions(value.PayloadChannelCapacity)
+        {
+            FullMode = BoundedChannelFullMode.DropOldest,
+            SingleReader = true,
             SingleWriter = false
         });
 
@@ -35,15 +43,28 @@ public sealed class CsiIngestionChannel
         });
     }
 
-    public ChannelReader<NodePayload> PayloadReader => _payloadChannel.Reader;
+    /// <summary>
+    /// Channel consumed by the UI state store (CsiNodeStateStore).
+    /// </summary>
+    public ChannelReader<NodePayload> StateStorePayloadReader => _stateStorePayloadChannel.Reader;
+
+    /// <summary>
+    /// Channel consumed by the DSP pipeline (CsiDspBackgroundService).
+    /// </summary>
+    public ChannelReader<NodePayload> DspPayloadReader => _dspPayloadChannel.Reader;
 
     public ChannelReader<NodeStateChanged> StateReader => _stateChannel.Reader;
 
     /// <summary>
-    /// Attempts to publish a payload without ever blocking the serial RX thread.
+    /// Attempts to publish a payload to both the state store and DSP channels
+    /// without ever blocking the serial RX thread.
     /// </summary>
     public bool TryPublish(NodePayload payload)
-        => _payloadChannel.Writer.TryWrite(payload);
+    {
+        var writtenToStateStore = _stateStorePayloadChannel.Writer.TryWrite(payload);
+        var writtenToDsp = _dspPayloadChannel.Writer.TryWrite(payload);
+        return writtenToStateStore && writtenToDsp;
+    }
 
     /// <summary>
     /// Attempts to publish a node state change without blocking the serial RX thread.

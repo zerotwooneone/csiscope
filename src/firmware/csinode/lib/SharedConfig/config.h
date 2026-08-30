@@ -14,6 +14,9 @@ namespace Config
     constexpr uint32_t SERIAL_BAUD = 921600;
     constexpr uint32_t HEARTBEAT_INTERVAL_MS = 1000;
 
+    // Active Wi-Fi bandwidth (MHz). Sent in heartbeat and config payloads.
+    constexpr uint8_t CSI_BANDWIDTH = 20;
+
     // I2C Addresses
     constexpr uint8_t BNO085_ADDR_DEFAULT = 0x4A;
 }

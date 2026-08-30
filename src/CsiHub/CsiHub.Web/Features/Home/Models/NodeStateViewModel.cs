@@ -39,6 +39,11 @@ public sealed class NodeStateViewModel
     public bool? ImuHost { get; set; }
 
     /// <summary>
+    /// Active Wi-Fi bandwidth in MHz (20 or 40) reported by the node.
+    /// </summary>
+    public int? Bandwidth { get; set; }
+
+    /// <summary>
     /// The persistent hardware configuration for this node, if one exists.
     /// </summary>
     public NodeConfiguration? Configuration { get; set; }

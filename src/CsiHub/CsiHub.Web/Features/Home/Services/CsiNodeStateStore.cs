@@ -136,6 +136,20 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
                     _ => CreateViewModel(state, key, existingConfig),
                     (_, existing) => CreateViewModel(state, key, existingConfig, existing));
 
+                if (state.Mac is not null && state.Bandwidth.HasValue)
+                {
+                    try
+                    {
+                        await _configurationService
+                            .SetBandwidthAsync(state.Mac, state.Bandwidth.Value, cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to persist bandwidth for {Mac}.", state.Mac);
+                    }
+                }
+
                 if (state.Mac is not null && ShouldRestore(state, existingConfig))
                 {
                     await TryRestoreFeaturesAsync(state, existingConfig, cancellationToken).ConfigureAwait(false);
@@ -152,7 +166,7 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
     {
         try
         {
-            await foreach (var payload in _channel.PayloadReader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+            await foreach (var payload in _channel.StateStorePayloadReader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
             {
                 if (payload.Type == "error")
                 {
@@ -289,6 +303,7 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
             LastSeen = state.ReceivedAt ?? state.Timestamp,
             ClockLeader = state.ClockLeader,
             ImuHost = state.ImuHost,
+            Bandwidth = state.Bandwidth ?? configuration?.Bandwidth ?? existing?.Bandwidth,
             Configuration = configuration,
             ActiveErrors = mac is not null ? GetSnapshot(mac) : existing?.ActiveErrors ?? new Dictionary<string, string>(),
         };

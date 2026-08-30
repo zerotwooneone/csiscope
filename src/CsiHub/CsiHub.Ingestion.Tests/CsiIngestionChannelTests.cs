@@ -25,7 +25,7 @@ public class CsiIngestionChannelTests
         };
 
         Assert.True(channel.TryPublish(payload));
-        Assert.True(channel.PayloadReader.TryRead(out var received));
+        Assert.True(channel.StateStorePayloadReader.TryRead(out var received));
 
         Assert.NotNull(received);
         Assert.Equal("hb", received.Type);
@@ -57,7 +57,7 @@ public class CsiIngestionChannelTests
         channel.TryPublish(new NodePayload { Type = "3" }); // Should drop the oldest (0)
 
         var types = new List<string?>();
-        while (channel.PayloadReader.TryRead(out var payload))
+        while (channel.StateStorePayloadReader.TryRead(out var payload))
         {
             types.Add(payload!.Type);
         }
@@ -78,7 +78,7 @@ public class CsiIngestionChannelTests
         }
 
         var types = new List<string?>();
-        while (channel.PayloadReader.TryRead(out var payload))
+        while (channel.StateStorePayloadReader.TryRead(out var payload))
         {
             types.Add(payload!.Type);
         }
@@ -86,5 +86,22 @@ public class CsiIngestionChannelTests
         // Only the most recent 'capacity' items should remain.
         Assert.Equal(capacity, types.Count);
         Assert.Equal(Enumerable.Range(publishCount - capacity, capacity).Select(i => i.ToString()), types);
+    }
+
+    [Fact]
+    public void TryPublish_Fans_Out_To_StateStore_And_Dsp_Channels()
+    {
+        var channel = CreateChannel();
+        var payload = new NodePayload { Type = "csi", Mac = "AA:BB:CC:DD:EE:FF" };
+
+        Assert.True(channel.TryPublish(payload));
+
+        Assert.True(channel.StateStorePayloadReader.TryRead(out var stateStorePayload));
+        Assert.True(channel.DspPayloadReader.TryRead(out var dspPayload));
+
+        Assert.Equal("csi", stateStorePayload!.Type);
+        Assert.Equal("csi", dspPayload!.Type);
+        Assert.Equal("AA:BB:CC:DD:EE:FF", stateStorePayload.Mac);
+        Assert.Equal("AA:BB:CC:DD:EE:FF", dspPayload.Mac);
     }
 }

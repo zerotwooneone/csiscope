@@ -62,6 +62,27 @@ public sealed class CsiNodeConfigurationService
     }
 
     /// <summary>
+    /// Updates the persisted bandwidth for a node, preserving existing feature flags.
+    /// </summary>
+    public async Task SetBandwidthAsync(string mac, int bandwidth, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(mac))
+        {
+            throw new ArgumentException("MAC address is required.", nameof(mac));
+        }
+
+        if (!_configurations.TryGetValue(mac, out var existing) || existing is null)
+        {
+            existing = new NodeConfiguration { Mac = mac };
+        }
+
+        existing.Bandwidth = bandwidth;
+
+        _configurations[mac] = existing;
+        await SaveAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Removes a saved configuration and persists the change.
     /// </summary>
     public async Task RemoveConfigurationAsync(string mac, CancellationToken cancellationToken = default)

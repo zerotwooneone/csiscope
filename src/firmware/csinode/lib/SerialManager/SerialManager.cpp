@@ -230,6 +230,7 @@ void SerialManager::sendConfig()
     doc["mac"] = nodeMacAddress;
     doc["state"] = stateToString(currentState);
     doc["baud"] = Config::SERIAL_BAUD;
+    doc["bw"] = Config::CSI_BANDWIDTH;
     doc["version"] = "0.1.0";
 
     serializeJson(doc, Serial);

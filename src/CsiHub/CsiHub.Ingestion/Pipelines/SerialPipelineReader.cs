@@ -366,7 +366,8 @@ public sealed class SerialPipelineReader
                 payload.ReceivedAt,
                 force: isHeartbeat,
                 clockLeader: payload.ClockLeader,
-                imuHost: payload.ImuHost);
+                imuHost: payload.ImuHost,
+                bandwidth: payload.Bandwidth);
         }
     }
 
@@ -390,7 +391,8 @@ public sealed class SerialPipelineReader
         DateTimeOffset? receivedAt = null,
         bool force = false,
         bool? clockLeader = null,
-        bool? imuHost = null)
+        bool? imuHost = null,
+        int? bandwidth = null)
     {
         if (!force && _lastState == state)
         {
@@ -407,7 +409,8 @@ public sealed class SerialPipelineReader
             uptime,
             receivedAt,
             clockLeader,
-            imuHost);
+            imuHost,
+            bandwidth);
 
         _channel.TryPublishState(change);
     }

@@ -30,6 +30,11 @@ public sealed class NodePayload
 
     public bool? ImuHost { get; set; }
 
+    /// <summary>
+    /// Active Wi-Fi bandwidth in MHz (20 or 40).
+    /// </summary>
+    public int? Bandwidth { get; set; }
+
     public double[]? Csi { get; set; }
 
     public double[]? Imu { get; set; }

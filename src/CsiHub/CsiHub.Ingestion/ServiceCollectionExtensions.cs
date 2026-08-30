@@ -23,6 +23,7 @@ public static class CsiIngestionServiceCollectionExtensions
         services.AddSingleton<ISerialPortFactory, SerialPortAdapterFactory>();
         services.AddSingleton<CsiNodePortManager>();
         services.AddHostedService<CsiIngestionBackgroundService>();
+        services.AddHostedService<CsiDspBackgroundService>();
 
         return services;
     }

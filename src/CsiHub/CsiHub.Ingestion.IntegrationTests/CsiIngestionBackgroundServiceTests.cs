@@ -44,7 +44,7 @@ public class CsiIngestionBackgroundServiceTests
 
         var channel = host.Services.GetRequiredService<CsiIngestionChannel>();
 
-        var payload = await channel.PayloadReader.ReadAsync().AsTask()
+        var payload = await channel.StateStorePayloadReader.ReadAsync().AsTask()
             .WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
 
         Assert.Equal("hb", payload.Type);
@@ -101,7 +101,7 @@ public class CsiIngestionBackgroundServiceTests
         var payloads = new List<NodePayload>();
         for (int i = 0; i < capacity; i++)
         {
-            var payload = await channel.PayloadReader.ReadAsync().AsTask()
+            var payload = await channel.StateStorePayloadReader.ReadAsync().AsTask()
                 .WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
             payloads.Add(payload);
         }

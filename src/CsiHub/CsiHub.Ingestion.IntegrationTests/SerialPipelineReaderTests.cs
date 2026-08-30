@@ -19,7 +19,7 @@ public class SerialPipelineReaderTests
         await TestHelper.WaitForOpenAsync(harness.Port);
         await TestHelper.WriteLineAsync(harness.Port.Downlink, """{"type":"hb","mac":"00:11:22:33:44:55","state":"standby","uptime":5}""");
 
-        var payload = await harness.Channel.PayloadReader.ReadAsync().AsTask()
+        var payload = await harness.Channel.StateStorePayloadReader.ReadAsync().AsTask()
             .WaitAsync(TimeSpan.FromSeconds(1));
 
         Assert.Equal("hb", payload.Type);
