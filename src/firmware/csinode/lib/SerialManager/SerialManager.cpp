@@ -9,7 +9,6 @@
 
 // Global state exported from main.cpp
 extern SystemState currentState;
-extern NodeRole currentRole;
 extern String nodeMacAddress;
 
 char SerialManager::rxBuffer[RX_BUFFER_SIZE];
@@ -34,20 +33,6 @@ void SerialManager::process()
     processLines();
 }
 
-const char* SerialManager::roleToString(NodeRole role)
-{
-    switch (role)
-    {
-    case NodeRole::LEADER:
-        return "leader";
-    case NodeRole::FOLLOWER:
-        return "follower";
-    case NodeRole::NONE:
-    default:
-        return "none";
-    }
-}
-
 const char* SerialManager::stateToString(SystemState state)
 {
     switch (state)
@@ -56,8 +41,6 @@ const char* SerialManager::stateToString(SystemState state)
         return "boot";
     case SystemState::STATE_STANDBY:
         return "standby";
-    case SystemState::STATE_ASSIGNED:
-        return "assigned";
     case SystemState::STATE_STREAMING:
         return "streaming";
     case SystemState::STATE_DIAG_SYNC:
@@ -186,41 +169,6 @@ void SerialManager::parseAndDispatch(const char* line)
     {
         sendConfig();
     }
-    else if (strcmp(cmd, "set_role") == 0)
-    {
-        const char* role = doc["role"];
-        if (!role || *role == '\0')
-        {
-            sendError("set_role", "missing_role");
-            return;
-        }
-
-        if (strcmp(role, "leader") == 0)
-        {
-            currentRole = NodeRole::LEADER;
-        }
-        else if (strcmp(role, "follower") == 0)
-        {
-            currentRole = NodeRole::FOLLOWER;
-        }
-        else if (strcmp(role, "none") == 0)
-        {
-            currentRole = NodeRole::NONE;
-        }
-        else
-        {
-            sendError("set_role", "invalid_role");
-            return;
-        }
-
-        // Role assignment is the transition out of standby into an assigned identity.
-        if (currentState == SystemState::STATE_STANDBY)
-        {
-            currentState = SystemState::STATE_ASSIGNED;
-        }
-
-        sendAck("set_role", true);
-    }
     else if (strcmp(cmd, "diag_test") == 0)
     {
         const char* type = doc["type"];
@@ -280,7 +228,6 @@ void SerialManager::sendConfig()
     doc.clear();
     doc["type"] = "config";
     doc["mac"] = nodeMacAddress;
-    doc["role"] = roleToString(currentRole);
     doc["state"] = stateToString(currentState);
     doc["baud"] = Config::SERIAL_BAUD;
     doc["version"] = "0.1.0";
@@ -300,7 +247,6 @@ void SerialManager::sendAck(const char* cmd, bool success, const char* reason)
     {
         doc["reason"] = reason;
     }
-    doc["role"] = roleToString(currentRole);
     doc["state"] = stateToString(currentState);
 
     serializeJson(doc, Serial);

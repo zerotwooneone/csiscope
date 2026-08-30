@@ -85,10 +85,6 @@ LedManager::Pattern LedManager::patternForState(SystemState state)
         // Blinking magenta in IMU diagnostic mode.
         return { CRGB::Magenta, CRGB::Black, 250, 250, false, 500 };
 
-    case SystemState::STATE_ASSIGNED:
-        // Cyan pulse when the node has been assigned a role.
-        return { CRGB::Cyan, CRGB::Black, 500, 500, true, 1500 };
-
     case SystemState::STATE_STANDBY:
     case SystemState::STATE_BOOT:
     default:

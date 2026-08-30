@@ -377,7 +377,6 @@ public sealed class SerialPipelineReader
         return lowered switch
         {
             "standby" or "boot" => NodeConnectionState.Standby,
-            "assigned" => NodeConnectionState.Assigned,
             "streaming" => NodeConnectionState.Streaming,
             null => NodeConnectionState.Disconnected,
             _ when lowered.StartsWith("diag_") => NodeConnectionState.Assigned,

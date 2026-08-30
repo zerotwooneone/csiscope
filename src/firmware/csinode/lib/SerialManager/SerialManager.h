@@ -13,7 +13,6 @@ public:
     static void begin();
     static void process();
 
-    static const char* roleToString(NodeRole role);
     static const char* stateToString(SystemState state);
 
 private:

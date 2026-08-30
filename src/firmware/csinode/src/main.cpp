@@ -10,7 +10,6 @@
 
 // Global State
 SystemState currentState = SystemState::STATE_BOOT;
-NodeRole currentRole = NodeRole::NONE;
 String nodeMacAddress;
 unsigned long lastHeartbeatMs = 0;
 
@@ -66,7 +65,6 @@ void loop()
   switch (currentState)
   {
   case SystemState::STATE_STANDBY:
-  case SystemState::STATE_ASSIGNED:
     // Broadcasts a 1Hz heartbeat identifying itself[cite: 1]
     if (currentMs - lastHeartbeatMs >= Config::HEARTBEAT_INTERVAL_MS)
     {
@@ -77,7 +75,6 @@ void loop()
       hbDoc.clear();
       hbDoc["type"] = "hb";
       hbDoc["mac"] = nodeMacAddress;
-      hbDoc["role"] = SerialManager::roleToString(currentRole);
       hbDoc["state"] = SerialManager::stateToString(currentState);
       hbDoc["uptime"] = millis() / 1000;
       hbDoc["clock_leader"] = SyncManager::isLeader();
