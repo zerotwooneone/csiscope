@@ -53,6 +53,7 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
 
                 case "t":
                 case "timestamp":
+                case "uptime":
                     if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt64(out long timestamp))
                     {
                         payload.Timestamp = timestamp;

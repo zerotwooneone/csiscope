@@ -119,9 +119,8 @@ public sealed class SerialPipelineReader
             "Opened serial port {Port}.",
             _portName);
 
-        // The node is physically present; assume it is in standby until it reports otherwise.
-        PublishState(NodeConnectionState.Standby);
-
+        // The first heartbeat or state-bearing payload will publish the real state
+        // and carry the node's MAC and uptime, so we do not emit an empty Standby here.
         var reader = PipeReader.Create(
             port.BaseStream,
             new StreamPipeReaderOptions(
@@ -360,7 +359,8 @@ public sealed class SerialPipelineReader
 
         if (!string.IsNullOrEmpty(payload.State))
         {
-            PublishState(ParseConnectionState(payload.State));
+            bool isHeartbeat = string.Equals(payload.Type, "hb", StringComparison.Ordinal);
+            PublishState(ParseConnectionState(payload.State), payload.Timestamp, payload.ReceivedAt, force: isHeartbeat);
         }
     }
 
@@ -379,9 +379,13 @@ public sealed class SerialPipelineReader
         };
     }
 
-    private void PublishState(NodeConnectionState state)
+    private void PublishState(
+        NodeConnectionState state,
+        long? uptime = null,
+        DateTimeOffset? receivedAt = null,
+        bool force = false)
     {
-        if (_lastState == state)
+        if (!force && _lastState == state)
         {
             return;
         }
@@ -392,7 +396,9 @@ public sealed class SerialPipelineReader
             _portName,
             _lastMac,
             state,
-            DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow,
+            uptime,
+            receivedAt);
 
         _channel.TryPublishState(change);
     }

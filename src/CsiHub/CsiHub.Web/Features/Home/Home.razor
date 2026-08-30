@@ -1,7 +1,61 @@
-﻿@page "/"
+@page "/"
+@using CsiHub.Features.Home.Services
+@inject CsiNodeStateStore Store
+@implements IAsyncDisposable
 
-<PageTitle>Home</PageTitle>
+<PageTitle>Low-Level View</PageTitle>
 
-<h1>Hello, world!</h1>
+<h3>Low-Level View</h3>
 
-Welcome to your new app.
+<table class="table">
+    <thead>
+        <tr>
+            <th>COM Port</th>
+            <th>MAC Address</th>
+            <th>Connection Status</th>
+            <th>Uptime</th>
+            <th>Last Seen</th>
+        </tr>
+    </thead>
+    <tbody>
+        @foreach (var node in Store.Nodes.Values)
+        {
+            <tr class="@(node.IsDisconnected ? "table-danger" : "")">
+                <td>@node.PortName</td>
+                <td>@(node.Mac ?? "-")</td>
+                <td>@node.State</td>
+                <td>@(node.Uptime is not null ? TimeSpan.FromSeconds(node.Uptime.Value).ToString("hh\\:mm\\:ss") : "-")</td>
+                <td>@(node.LastSeen is not null ? (DateTimeOffset.UtcNow - node.LastSeen.Value).ToString("hh\\:mm\\:ss") + " ago" : "-")</td>
+            </tr>
+        }
+    </tbody>
+</table>
+
+@code {
+    private PeriodicTimer? _timer;
+
+    protected override void OnInitialized()
+    {
+        _timer = new PeriodicTimer(TimeSpan.FromMilliseconds(333));
+        _ = UpdateLoop();
+    }
+
+    private async Task UpdateLoop()
+    {
+        if (_timer is null)
+        {
+            return;
+        }
+
+        while (await _timer.WaitForNextTickAsync().ConfigureAwait(false))
+        {
+            await InvokeAsync(StateHasChanged).ConfigureAwait(false);
+        }
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        _timer?.Dispose();
+        return ValueTask.CompletedTask;
+    }
+}

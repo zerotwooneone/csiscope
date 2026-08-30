@@ -1,3 +1,4 @@
+using CsiHub.Features.Home.Services;
 using CsiHub.Features.Shell;
 using CsiHub.Ingestion;
 
@@ -8,6 +9,9 @@ builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
 
 builder.Services.AddCsiIngestion(builder.Configuration.GetSection("CsiIngestion"));
+
+builder.Services.AddSingleton<CsiNodeStateStore>();
+builder.Services.AddSingleton<IHostedService>(provider => provider.GetRequiredService<CsiNodeStateStore>());
 
 var app = builder.Build();
 
