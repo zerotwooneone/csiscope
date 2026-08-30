@@ -1,4 +1,5 @@
 using CsiHub.Ingestion.Channels;
+using CsiHub.Ingestion.Pipelines;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -19,6 +20,7 @@ public static class CsiIngestionServiceCollectionExtensions
     {
         services.AddOptions<CsiIngestionOptions>();
         services.AddSingleton<CsiIngestionChannel>();
+        services.AddSingleton<ISerialPortFactory, SerialPortAdapterFactory>();
         services.AddSingleton<CsiNodePortManager>();
         services.AddHostedService<CsiIngestionBackgroundService>();
 

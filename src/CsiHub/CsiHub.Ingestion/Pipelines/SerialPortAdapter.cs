@@ -41,4 +41,10 @@ public sealed class SerialPortAdapter : ISerialPort
     }
 
     public void Dispose() => _port.Dispose();
+
+    public ValueTask DisposeAsync()
+    {
+        Dispose();
+        return ValueTask.CompletedTask;
+    }
 }

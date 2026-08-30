@@ -15,6 +15,7 @@ public sealed class CsiNodePortManager
 {
     private readonly CsiIngestionOptions _options;
     private readonly CsiIngestionChannel _channel;
+    private readonly ISerialPortFactory _portFactory;
     private readonly ILogger<CsiNodePortManager> _logger;
 
     private CancellationTokenSource? _cts;
@@ -24,10 +25,12 @@ public sealed class CsiNodePortManager
     public CsiNodePortManager(
         IOptions<CsiIngestionOptions> options,
         CsiIngestionChannel channel,
+        ISerialPortFactory portFactory,
         ILogger<CsiNodePortManager> logger)
     {
         _options = options.Value;
         _channel = channel;
+        _portFactory = portFactory;
         _logger = logger;
     }
 
@@ -54,7 +57,7 @@ public sealed class CsiNodePortManager
 
             var reader = new SerialPipelineReader(
                 portName,
-                () => new SerialPortAdapter(portName, _options.SerialBaudRate),
+                () => _portFactory.Create(portName, _options.SerialBaudRate),
                 _options.CommandChannelCapacity,
                 _options.ReconnectDelayMs,
                 _channel,

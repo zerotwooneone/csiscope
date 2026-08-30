@@ -68,11 +68,20 @@ public sealed class FakeSerialPort : ISerialPort
 
     public void Close()
     {
-        try { BaseStream.Close(); } catch { }
+        try { BaseStream?.Close(); } catch { }
         try { _server?.Close(); } catch { }
         try { _client?.Close(); } catch { }
         try { _listener?.Stop(); } catch { }
+
+        BaseStream = Stream.Null;
+        Downlink = Stream.Null;
     }
 
     public void Dispose() => Close();
+
+    public ValueTask DisposeAsync()
+    {
+        Close();
+        return ValueTask.CompletedTask;
+    }
 }

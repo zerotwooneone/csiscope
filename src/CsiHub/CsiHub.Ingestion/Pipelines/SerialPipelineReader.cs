@@ -111,7 +111,7 @@ public sealed class SerialPipelineReader
 
     private async Task RunOnceAsync(CancellationToken cancellationToken)
     {
-        using var port = _portFactory();
+        await using var port = _portFactory();
 
         port.Open();
 

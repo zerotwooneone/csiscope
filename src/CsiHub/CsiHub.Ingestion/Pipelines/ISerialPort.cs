@@ -6,7 +6,7 @@ namespace CsiHub.Ingestion.Pipelines;
 /// Abstracts a physical or virtual serial port so <see cref="SerialPipelineReader"/>
 /// can be integration-tested with in-memory streams without a real COM device.
 /// </summary>
-public interface ISerialPort : IDisposable
+public interface ISerialPort : IDisposable, IAsyncDisposable
 {
     /// <summary>
     /// The port identifier used for logging and diagnostics.
