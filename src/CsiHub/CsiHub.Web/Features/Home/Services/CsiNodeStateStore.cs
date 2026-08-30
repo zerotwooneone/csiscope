@@ -30,6 +30,22 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
     /// </summary>
     public IReadOnlyDictionary<string, NodeStateViewModel> Nodes => _nodes;
 
+    /// <summary>
+    /// Attempts to look up the COM port associated with a node, using its
+    /// MAC address or fallback key. Returns true when the node is known.
+    /// </summary>
+    public bool TryGetPortName(string mac, out string? portName)
+    {
+        if (_nodes.TryGetValue(mac, out var node))
+        {
+            portName = node.PortName;
+            return true;
+        }
+
+        portName = null;
+        return false;
+    }
+
     public Task StartAsync(CancellationToken cancellationToken)
     {
         _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);

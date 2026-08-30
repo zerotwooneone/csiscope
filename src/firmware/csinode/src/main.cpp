@@ -3,6 +3,7 @@
 #include "config.h"
 #include "protocol_types.h"
 #include "HardwareDiagnostics.h"
+#include "LedManager.h"
 #include "SerialManager.h"
 
 // Global State
@@ -24,6 +25,7 @@ void setup()
   }
 
   SerialManager::begin();
+  LedManager::begin();
 
   HardwareDiagnostics::setLedState(currentState);
   nodeMacAddress = HardwareDiagnostics::getMacAddress();
@@ -49,6 +51,9 @@ void loop()
 
   // Non-blocking NDJSON command ingestion; never waits inside this call.
   SerialManager::process();
+
+  // Update the RGB LED pattern without blocking.
+  LedManager::update(currentMs);
 
   // State execution matrix
   switch (currentState)

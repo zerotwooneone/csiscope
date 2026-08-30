@@ -1,7 +1,9 @@
 #include "SerialManager.h"
 #include "config.h"
+#include "HardwareDiagnostics.h"
 
 #include <cstring>
+#include "esp_system.h"
 
 // Global state exported from main.cpp
 extern SystemState currentState;
@@ -216,6 +218,28 @@ void SerialManager::parseAndDispatch(const char* line)
         }
 
         sendAck("set_role", true);
+    }
+    else if (strcmp(cmd, "diag_test") == 0)
+    {
+        const char* type = doc["type"];
+        if (!type || strcmp(type, "sync") != 0)
+        {
+            sendError("diag_test", "missing_or_invalid_type");
+            return;
+        }
+
+        currentState = SystemState::STATE_DIAG_SYNC;
+        HardwareDiagnostics::setLedState(currentState);
+        sendAck("diag_test", true);
+    }
+    else if (strcmp(cmd, "reboot") == 0)
+    {
+        sendAck("reboot", true);
+
+        // Flush the outgoing NDJSON ack before resetting the SoC.
+        Serial.flush();
+
+        ESP.restart();
     }
     else
     {

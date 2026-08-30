@@ -1,6 +1,7 @@
 #include "HardwareDiagnostics.h"
 #include "esp_system.h"
 #include "esp_mac.h"
+#include "LedManager.h"
 #include <protocol_types.h>
 
 void HardwareDiagnostics::executePOST()
@@ -54,21 +55,6 @@ String HardwareDiagnostics::getMacAddress()
 
 void HardwareDiagnostics::setLedState(SystemState state)
 {
-    // Pseudo-code mapping visual hardware feedback directly to local node states[cite: 1]
-    switch (state)
-    {
-    case SystemState::STATE_BOOT:
-    case SystemState::STATE_STANDBY:
-        // Pulsing Yellow: Boot / Standby mode, waiting for host assignment[cite: 1]
-        break;
-    case SystemState::STATE_STREAMING:
-        // Solid Green: Active streaming with zero packet or interrupt drops[cite: 1]
-        break;
-    case SystemState::STATE_DIAG_RF:
-        // Blinking Blue: Diagnostic RF sniffing mode active[cite: 1]
-        break;
-    default:
-        // Blinking Red: Hardware fault[cite: 1]
-        break;
-    }
+    // Delegate all visual feedback to the non-blocking LED manager.
+    LedManager::setState(state);
 }

@@ -1,11 +1,22 @@
 @page "/"
+@rendermode InteractiveServer
 @using CsiHub.Features.Home.Services
+@using CsiHub.Ingestion
 @inject CsiNodeStateStore Store
+@inject CsiNodePortManager PortManager
 @implements IAsyncDisposable
 
 <PageTitle>Low-Level View</PageTitle>
 
 <h3>Low-Level View</h3>
+
+@if (!string.IsNullOrWhiteSpace(_errorMessage))
+{
+    <div class="alert alert-danger alert-dismissible fade show" role="alert">
+        @_errorMessage
+        <button type="button" class="btn-close" aria-label="Close" @onclick="() => _errorMessage = null"></button>
+    </div>
+}
 
 <table class="table">
     <thead>
@@ -15,6 +26,7 @@
             <th>Connection Status</th>
             <th>Uptime</th>
             <th>Last Seen</th>
+            <th>Actions</th>
         </tr>
     </thead>
     <tbody>
@@ -26,6 +38,10 @@
                 <td>@node.State</td>
                 <td>@(node.Uptime is not null ? TimeSpan.FromSeconds(node.Uptime.Value).ToString("hh\\:mm\\:ss") : "-")</td>
                 <td>@(node.LastSeen is not null ? (DateTimeOffset.UtcNow - node.LastSeen.Value).ToString("hh\\:mm\\:ss") + " ago" : "-")</td>
+                <td>
+                    <button class="btn btn-sm btn-warning" disabled="@IsDisabled(node.Key)" @onclick="() => SendSyncTest(node)">Sync Test</button>
+                    <button class="btn btn-sm btn-danger ms-1" disabled="@IsDisabled(node.Key)" @onclick="() => SendReboot(node)">Reboot</button>
+                </td>
             </tr>
         }
     </tbody>
@@ -33,9 +49,16 @@
 
 @code {
     private PeriodicTimer? _timer;
+    private string? _errorMessage;
+    private readonly ConcurrentDictionary<string, byte> _cooldownKeys = new();
 
-    protected override void OnInitialized()
+    protected override void OnAfterRender(bool firstRender)
     {
+        if (!firstRender || _timer is not null)
+        {
+            return;
+        }
+
         _timer = new PeriodicTimer(TimeSpan.FromMilliseconds(333));
         _ = UpdateLoop();
     }
@@ -51,6 +74,68 @@
         {
             await InvokeAsync(StateHasChanged).ConfigureAwait(false);
         }
+    }
+
+    private bool IsDisabled(string key)
+    {
+        return _cooldownKeys.ContainsKey(key);
+    }
+
+    private async Task SendCommandAsync(NodeStateViewModel node, string cmd, string? type = null)
+    {
+        var key = node.Key;
+
+        if (!_cooldownKeys.TryAdd(key, 0))
+        {
+            return;
+        }
+
+        try
+        {
+            if (node.IsDisconnected)
+            {
+                _errorMessage = $"Cannot send {cmd} to {node.PortName}: node is disconnected.";
+                return;
+            }
+
+            if (!Store.TryGetPortName(key, out var portName) || string.IsNullOrWhiteSpace(portName))
+            {
+                _errorMessage = $"Cannot send {cmd} to {node.Mac ?? node.PortName}: port not found.";
+                return;
+            }
+
+            var json = type is null
+                ? $"{{\"cmd\":\"{cmd}\"}}"
+                : $"{{\"cmd\":\"{cmd}\",\"type\":\"{type}\"}}";
+
+            if (!PortManager.TrySendCommand(portName, json))
+            {
+                _errorMessage = $"Failed to send {cmd} to {portName}: channel is closed.";
+            }
+        }
+        finally
+        {
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(2000).ConfigureAwait(false);
+                _cooldownKeys.TryRemove(key, out _);
+                await InvokeAsync(() =>
+                {
+                    _errorMessage = null;
+                    StateHasChanged();
+                }).ConfigureAwait(false);
+            });
+        }
+    }
+
+    private Task SendSyncTest(NodeStateViewModel node)
+    {
+        return SendCommandAsync(node, "diag_test", "sync");
+    }
+
+    private Task SendReboot(NodeStateViewModel node)
+    {
+        return SendCommandAsync(node, "reboot");
     }
 
     public ValueTask DisposeAsync()
