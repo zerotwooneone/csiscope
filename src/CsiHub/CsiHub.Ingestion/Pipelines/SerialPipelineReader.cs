@@ -360,7 +360,13 @@ public sealed class SerialPipelineReader
         if (!string.IsNullOrEmpty(payload.State))
         {
             bool isHeartbeat = string.Equals(payload.Type, "hb", StringComparison.Ordinal);
-            PublishState(ParseConnectionState(payload.State), payload.Timestamp, payload.ReceivedAt, force: isHeartbeat);
+            PublishState(
+                ParseConnectionState(payload.State),
+                payload.Timestamp,
+                payload.ReceivedAt,
+                force: isHeartbeat,
+                clockLeader: payload.ClockLeader,
+                imuHost: payload.ImuHost);
         }
     }
 
@@ -383,7 +389,9 @@ public sealed class SerialPipelineReader
         NodeConnectionState state,
         long? uptime = null,
         DateTimeOffset? receivedAt = null,
-        bool force = false)
+        bool force = false,
+        bool? clockLeader = null,
+        bool? imuHost = null)
     {
         if (!force && _lastState == state)
         {
@@ -398,7 +406,9 @@ public sealed class SerialPipelineReader
             state,
             DateTimeOffset.UtcNow,
             uptime,
-            receivedAt);
+            receivedAt,
+            clockLeader,
+            imuHost);
 
         _channel.TryPublishState(change);
     }

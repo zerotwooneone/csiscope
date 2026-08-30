@@ -1,8 +1,11 @@
 using System.Collections.Concurrent;
+using System.Text.Json;
 using CsiHub.Features.Home.Models;
+using CsiHub.Ingestion;
 using CsiHub.Ingestion.Channels;
 using CsiHub.Ingestion.Models;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 
 namespace CsiHub.Features.Home.Services;
 
@@ -15,14 +18,25 @@ namespace CsiHub.Features.Home.Services;
 public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
 {
     private readonly CsiIngestionChannel _channel;
+    private readonly CsiNodePortManager _portManager;
+    private readonly CsiNodeConfigurationService _configurationService;
+    private readonly ILogger<CsiNodeStateStore> _logger;
     private readonly ConcurrentDictionary<string, NodeStateViewModel> _nodes = new();
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _lastRestore = new();
 
     private CancellationTokenSource? _cts;
     private Task? _runTask;
 
-    public CsiNodeStateStore(CsiIngestionChannel channel)
+    public CsiNodeStateStore(
+        CsiIngestionChannel channel,
+        CsiNodePortManager portManager,
+        CsiNodeConfigurationService configurationService,
+        ILogger<CsiNodeStateStore> logger)
     {
         _channel = channel;
+        _portManager = portManager;
+        _configurationService = configurationService;
+        _logger = logger;
     }
 
     /// <summary>
@@ -61,10 +75,17 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
             {
                 var key = state.Mac ?? state.PortName;
 
+                _configurationService.TryGetConfiguration(state.Mac ?? string.Empty, out var existingConfig);
+
                 _nodes.AddOrUpdate(
                     key,
-                    _ => ToViewModel(state, key),
-                    (_, existing) => ToViewModel(state, key, existing));
+                    _ => CreateViewModel(state, key, existingConfig),
+                    (_, existing) => CreateViewModel(state, key, existingConfig, existing));
+
+                if (state.Mac is not null && ShouldRestore(state, existingConfig))
+                {
+                    await TryRestoreFeaturesAsync(state, existingConfig, cancellationToken).ConfigureAwait(false);
+                }
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -73,7 +94,11 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
         }
     }
 
-    private static NodeStateViewModel ToViewModel(NodeStateChanged state, string key, NodeStateViewModel? existing = null)
+    private NodeStateViewModel CreateViewModel(
+        NodeStateChanged state,
+        string key,
+        NodeConfiguration? configuration,
+        NodeStateViewModel? existing = null)
     {
         var mac = state.Mac ?? existing?.Mac;
 
@@ -85,7 +110,75 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
             State = state.State,
             Uptime = state.Uptime ?? existing?.Uptime,
             LastSeen = state.ReceivedAt ?? state.Timestamp,
+            ClockLeader = state.ClockLeader,
+            ImuHost = state.ImuHost,
+            Configuration = configuration,
         };
+    }
+
+    private async Task TryRestoreFeaturesAsync(
+        NodeStateChanged state,
+        NodeConfiguration? configuration,
+        CancellationToken cancellationToken)
+    {
+        if (configuration is null || state.Mac is null)
+        {
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        if (_lastRestore.TryGetValue(state.Mac, out var last) && now - last < TimeSpan.FromSeconds(2))
+        {
+            return;
+        }
+
+        _lastRestore.AddOrUpdate(state.Mac, now, (_, _) => now);
+
+        var json = JsonSerializer.Serialize(new
+        {
+            cmd = "set_features",
+            clock_leader = configuration.ClockLeader,
+            imu_host = configuration.ImuHost,
+        });
+
+        if (!_portManager.TrySendCommand(state.PortName, json))
+        {
+            _logger.LogWarning(
+                "Failed to auto-restore feature flags to {Mac} on {Port}.",
+                state.Mac,
+                state.PortName);
+
+            _lastRestore.TryRemove(state.Mac, out _);
+            return;
+        }
+
+        _logger.LogInformation(
+            "Auto-restored feature flags to {Mac} on {Port} (clock_leader={ClockLeader}, imu_host={ImuHost}).",
+            state.Mac,
+            state.PortName,
+            configuration.ClockLeader,
+            configuration.ImuHost);
+    }
+
+    private static bool ShouldRestore(NodeStateChanged state, NodeConfiguration? configuration)
+    {
+        if (configuration is null || state.Mac is null)
+        {
+            return false;
+        }
+
+        // If the heartbeat reports feature flags, correct any drift from the persisted config.
+        if (state.ClockLeader.HasValue && state.ClockLeader.Value != configuration.ClockLeader)
+        {
+            return true;
+        }
+
+        if (state.ImuHost.HasValue && state.ImuHost.Value != configuration.ImuHost)
+        {
+            return true;
+        }
+
+        return false;
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)

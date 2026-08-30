@@ -1,6 +1,8 @@
 #include "SerialManager.h"
 #include "config.h"
 #include "HardwareDiagnostics.h"
+#include "ImuManager.h"
+#include "SyncManager.h"
 
 #include <cstring>
 #include "esp_system.h"
@@ -231,6 +233,22 @@ void SerialManager::parseAndDispatch(const char* line)
         currentState = SystemState::STATE_DIAG_SYNC;
         HardwareDiagnostics::setLedState(currentState);
         sendAck("diag_test", true);
+    }
+    else if (strcmp(cmd, "set_features") == 0)
+    {
+        bool clockLeader = doc["clock_leader"] | false;
+        bool imuHost = doc["imu_host"] | false;
+
+        bool syncOk = SyncManager::apply(clockLeader);
+        bool imuOk = ImuManager::apply(imuHost);
+
+        if (!syncOk || !imuOk)
+        {
+            sendError("set_features", syncOk ? "imu_init_failed" : "sync_init_failed");
+            return;
+        }
+
+        sendAck("set_features", true);
     }
     else if (strcmp(cmd, "reboot") == 0)
     {

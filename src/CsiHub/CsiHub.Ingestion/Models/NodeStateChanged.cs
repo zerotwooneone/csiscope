@@ -11,4 +11,6 @@ public sealed record NodeStateChanged(
     NodeConnectionState State,
     DateTimeOffset Timestamp,
     long? Uptime = null,
-    DateTimeOffset? ReceivedAt = null);
+    DateTimeOffset? ReceivedAt = null,
+    bool? ClockLeader = null,
+    bool? ImuHost = null);

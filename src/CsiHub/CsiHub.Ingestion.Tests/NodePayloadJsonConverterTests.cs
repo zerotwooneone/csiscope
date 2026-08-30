@@ -34,6 +34,19 @@ public class NodePayloadJsonConverterTests
     }
 
     [Fact]
+    public void Can_Parse_Heartbeat_With_Feature_Flags()
+    {
+        const string json = """{"type":"hb","mac":"AA:BB:CC:DD:EE:FF","state":"standby","uptime":5,"clock_leader":true,"imu_host":false}""";
+
+        var payload = JsonSerializer.Deserialize<NodePayload>(json);
+
+        Assert.NotNull(payload);
+        Assert.Equal("hb", payload.Type);
+        Assert.True(payload.ClockLeader);
+        Assert.False(payload.ImuHost);
+    }
+
+    [Fact]
     public void Can_Parse_Heartbeat_Only_Type()
     {
         const string json = """{"type":"hb"}""";

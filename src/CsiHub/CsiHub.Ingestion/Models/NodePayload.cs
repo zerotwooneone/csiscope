@@ -17,6 +17,10 @@ public sealed class NodePayload
 
     public string? State { get; set; }
 
+    public bool? ClockLeader { get; set; }
+
+    public bool? ImuHost { get; set; }
+
     public double[]? Csi { get; set; }
 
     public double[]? Imu { get; set; }

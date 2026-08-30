@@ -27,4 +27,19 @@ public sealed class NodeStateViewModel
     public DateTimeOffset? LastSeen { get; set; }
 
     public bool IsDisconnected => State == NodeConnectionState.Disconnected;
+
+    /// <summary>
+    /// Live clock_leader flag reported by the node in its heartbeat.
+    /// </summary>
+    public bool? ClockLeader { get; set; }
+
+    /// <summary>
+    /// Live imu_host flag reported by the node in its heartbeat.
+    /// </summary>
+    public bool? ImuHost { get; set; }
+
+    /// <summary>
+    /// The persistent hardware configuration for this node, if one exists.
+    /// </summary>
+    public NodeConfiguration? Configuration { get; set; }
 }

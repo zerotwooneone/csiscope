@@ -2,8 +2,10 @@
 @rendermode InteractiveServer
 @using CsiHub.Features.Home.Services
 @using CsiHub.Ingestion
+@using System.Text.Json
 @inject CsiNodeStateStore Store
 @inject CsiNodePortManager PortManager
+@inject CsiNodeConfigurationService ConfigService
 @implements IAsyncDisposable
 
 <PageTitle>Low-Level View</PageTitle>
@@ -39,8 +41,41 @@
                 <td>@(node.Uptime is not null ? TimeSpan.FromSeconds(node.Uptime.Value).ToString("hh\\:mm\\:ss") : "-")</td>
                 <td>@(node.LastSeen is not null ? (DateTimeOffset.UtcNow - node.LastSeen.Value).ToString("hh\\:mm\\:ss") + " ago" : "-")</td>
                 <td>
-                    <button class="btn btn-sm btn-warning" disabled="@IsDisabled(node.Key)" @onclick="() => SendSyncTest(node)">Sync Test</button>
-                    <button class="btn btn-sm btn-danger ms-1" disabled="@IsDisabled(node.Key)" @onclick="() => SendReboot(node)">Reboot</button>
+                    <div class="d-inline-flex flex-wrap gap-1">
+                        <div class="dropdown">
+                            <button class="btn btn-sm btn-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                                Actions
+                            </button>
+                            <ul class="dropdown-menu">
+                                <li><button class="dropdown-item" type="button" @onclick="() => SendSyncTest(node)">Sync Test</button></li>
+                                <li><button class="dropdown-item" type="button" @onclick="() => SendReboot(node)">Reboot</button></li>
+                            </ul>
+                        </div>
+
+                        @{
+                            var safeId = GetSafeId(node);
+                        }
+
+                        <div class="dropdown" data-bs-auto-close="outside">
+                            <button class="btn btn-sm btn-info dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                                Hardware Features
+                            </button>
+                            <ul class="dropdown-menu p-3" style="min-width: 14rem;">
+                                <li class="mb-2">
+                                    <div class="form-check form-switch" @onclick:stopPropagation="true">
+                                        <input class="form-check-input" type="checkbox" role="switch" id="clock-@safeId" checked="@IsClockLeader(node)" @onchange="(e) => ToggleClockLeader(node, e)">
+                                        <label class="form-check-label" for="clock-@safeId">Clock Leader</label>
+                                    </div>
+                                </li>
+                                <li>
+                                    <div class="form-check form-switch" @onclick:stopPropagation="true">
+                                        <input class="form-check-input" type="checkbox" role="switch" id="imu-@safeId" checked="@IsImuHost(node)" @onchange="(e) => ToggleImuHost(node, e)">
+                                        <label class="form-check-label" for="imu-@safeId">IMU Host</label>
+                                    </div>
+                                </li>
+                            </ul>
+                        </div>
+                    </div>
                 </td>
             </tr>
         }
@@ -51,6 +86,7 @@
     private PeriodicTimer? _timer;
     private string? _errorMessage;
     private readonly ConcurrentDictionary<string, byte> _cooldownKeys = new();
+    private readonly ConcurrentDictionary<string, NodeConfiguration> _localConfigurations = new();
 
     protected override void OnAfterRender(bool firstRender)
     {
@@ -79,6 +115,102 @@
     private bool IsDisabled(string key)
     {
         return _cooldownKeys.ContainsKey(key);
+    }
+
+    private NodeConfiguration GetConfig(NodeStateViewModel node)
+    {
+        return _localConfigurations.GetOrAdd(node.Key, _ =>
+        {
+            var mac = node.Mac ?? node.Key;
+            if (ConfigService.TryGetConfiguration(mac, out var existing) && existing is not null)
+            {
+                return new NodeConfiguration
+                {
+                    Mac = existing.Mac,
+                    ClockLeader = existing.ClockLeader,
+                    ImuHost = existing.ImuHost,
+                };
+            }
+
+            return new NodeConfiguration { Mac = mac };
+        });
+    }
+
+    private string GetSafeId(NodeStateViewModel node)
+    {
+        var mac = node.Mac ?? node.PortName ?? "unknown";
+        return System.Text.RegularExpressions.Regex.Replace(mac, @"[^a-zA-Z0-9]", "-");
+    }
+
+    private bool IsClockLeader(NodeStateViewModel node) => GetConfig(node).ClockLeader;
+    private bool IsImuHost(NodeStateViewModel node) => GetConfig(node).ImuHost;
+
+    private async Task ToggleClockLeader(NodeStateViewModel node, ChangeEventArgs e)
+    {
+        var config = GetConfig(node);
+        var newValue = e.Value is bool b && b;
+        var previous = config.ClockLeader;
+        config.ClockLeader = newValue;
+
+        if (!await TryPushFeaturesAsync(node, config))
+        {
+            config.ClockLeader = previous;
+        }
+    }
+
+    private async Task ToggleImuHost(NodeStateViewModel node, ChangeEventArgs e)
+    {
+        var config = GetConfig(node);
+        var newValue = e.Value is bool b && b;
+        var previous = config.ImuHost;
+        config.ImuHost = newValue;
+
+        if (!await TryPushFeaturesAsync(node, config))
+        {
+            config.ImuHost = previous;
+        }
+    }
+
+    private async Task<bool> TryPushFeaturesAsync(NodeStateViewModel node, NodeConfiguration config)
+    {
+        var key = node.Key;
+
+        if (node.IsDisconnected)
+        {
+            _errorMessage = $"Cannot update features for {node.PortName}: node is disconnected.";
+            return false;
+        }
+
+        if (!Store.TryGetPortName(key, out var portName) || string.IsNullOrWhiteSpace(portName))
+        {
+            _errorMessage = $"Cannot update features for {node.Mac ?? node.PortName}: port not found.";
+            return false;
+        }
+
+        var json = JsonSerializer.Serialize(new
+        {
+            cmd = "set_features",
+            clock_leader = config.ClockLeader,
+            imu_host = config.ImuHost,
+        });
+
+        if (!PortManager.TrySendCommand(portName, json))
+        {
+            _errorMessage = $"Failed to update features for {portName}: channel is closed.";
+            return false;
+        }
+
+        try
+        {
+            await ConfigService.SetConfigurationAsync(config).ConfigureAwait(false);
+            _errorMessage = null;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _errorMessage = $"Failed to save feature configuration: {ex.Message}";
+            return false;
+        }
     }
 
     private async Task SendCommandAsync(NodeStateViewModel node, string cmd, string? type = null)

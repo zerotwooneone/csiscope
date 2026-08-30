@@ -3,8 +3,10 @@
 #include "config.h"
 #include "protocol_types.h"
 #include "HardwareDiagnostics.h"
+#include "ImuManager.h"
 #include "LedManager.h"
 #include "SerialManager.h"
+#include "SyncManager.h"
 
 // Global State
 SystemState currentState = SystemState::STATE_BOOT;
@@ -26,6 +28,8 @@ void setup()
 
   SerialManager::begin();
   LedManager::begin();
+  SyncManager::begin();
+  ImuManager::begin();
 
   HardwareDiagnostics::setLedState(currentState);
   nodeMacAddress = HardwareDiagnostics::getMacAddress();
@@ -52,6 +56,9 @@ void loop()
   // Non-blocking NDJSON command ingestion; never waits inside this call.
   SerialManager::process();
 
+  // Service the IMU SHTP bus and cache the latest quaternion.
+  ImuManager::update();
+
   // Update the RGB LED pattern without blocking.
   LedManager::update(currentMs);
 
@@ -73,6 +80,8 @@ void loop()
       hbDoc["role"] = SerialManager::roleToString(currentRole);
       hbDoc["state"] = SerialManager::stateToString(currentState);
       hbDoc["uptime"] = millis() / 1000;
+      hbDoc["clock_leader"] = SyncManager::isLeader();
+      hbDoc["imu_host"] = ImuManager::isHost();
 
       serializeJson(hbDoc, Serial);
       Serial.println();
@@ -80,7 +89,24 @@ void loop()
     break;
 
   case SystemState::STATE_STREAMING:
-    // Handle high-speed CSI extraction and GPIO syncing
+    // High-speed CSI extraction and GPIO sync is handled by the SyncManager hardware.
+    // If the IMU is enabled, append the latest rotation vector to the telemetry stream.
+    {
+      float qw, qx, qy, qz;
+      if (ImuManager::tryGetQuaternion(qw, qx, qy, qz))
+      {
+        static JsonDocument imuDoc;
+        imuDoc.clear();
+        imuDoc["type"] = "imu";
+        imuDoc["mac"] = nodeMacAddress;
+        imuDoc["qw"] = qw;
+        imuDoc["qx"] = qx;
+        imuDoc["qy"] = qy;
+        imuDoc["qz"] = qz;
+        serializeJson(imuDoc, Serial);
+        Serial.println();
+      }
+    }
     break;
 
   default:

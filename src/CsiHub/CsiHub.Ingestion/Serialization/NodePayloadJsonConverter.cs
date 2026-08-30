@@ -64,6 +64,20 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
                     payload.State = reader.GetString();
                     break;
 
+                case "clock_leader":
+                    if (reader.TokenType == JsonTokenType.True || reader.TokenType == JsonTokenType.False)
+                    {
+                        payload.ClockLeader = reader.GetBoolean();
+                    }
+                    break;
+
+                case "imu_host":
+                    if (reader.TokenType == JsonTokenType.True || reader.TokenType == JsonTokenType.False)
+                    {
+                        payload.ImuHost = reader.GetBoolean();
+                    }
+                    break;
+
                 case "c":
                 case "csi":
                     payload.Csi = ReadDoubleArray(ref reader);
@@ -159,6 +173,16 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
         if (value.State is not null)
         {
             writer.WriteString("state", value.State);
+        }
+
+        if (value.ClockLeader.HasValue)
+        {
+            writer.WriteBoolean("clock_leader", value.ClockLeader.Value);
+        }
+
+        if (value.ImuHost.HasValue)
+        {
+            writer.WriteBoolean("imu_host", value.ImuHost.Value);
         }
 
         if (value.Csi is not null)
