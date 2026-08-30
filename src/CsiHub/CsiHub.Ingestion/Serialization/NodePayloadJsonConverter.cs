@@ -64,6 +64,19 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
                     payload.State = reader.GetString();
                     break;
 
+                case "cmd":
+                    payload.Cmd = reader.GetString();
+                    break;
+
+                case "param":
+                case "feature":
+                    payload.Param = reader.GetString();
+                    break;
+
+                case "reason":
+                    payload.Reason = reader.GetString();
+                    break;
+
                 case "clock_leader":
                     if (reader.TokenType == JsonTokenType.True || reader.TokenType == JsonTokenType.False)
                     {
@@ -173,6 +186,21 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
         if (value.State is not null)
         {
             writer.WriteString("state", value.State);
+        }
+
+        if (value.Cmd is not null)
+        {
+            writer.WriteString("cmd", value.Cmd);
+        }
+
+        if (value.Param is not null)
+        {
+            writer.WriteString("param", value.Param);
+        }
+
+        if (value.Reason is not null)
+        {
+            writer.WriteString("reason", value.Reason);
         }
 
         if (value.ClockLeader.HasValue)

@@ -2,10 +2,13 @@
 @rendermode InteractiveServer
 @using CsiHub.Features.Home.Services
 @using CsiHub.Ingestion
+@using Microsoft.JSInterop
+@using System.Linq
 @using System.Text.Json
 @inject CsiNodeStateStore Store
 @inject CsiNodePortManager PortManager
 @inject CsiNodeConfigurationService ConfigService
+@inject IJSRuntime JS
 @implements IAsyncDisposable
 
 <PageTitle>Low-Level View</PageTitle>
@@ -37,7 +40,13 @@
             <tr class="@(node.IsDisconnected ? "table-danger" : "")">
                 <td>@node.PortName</td>
                 <td>@(node.Mac ?? "-")</td>
-                <td>@node.State</td>
+                <td>
+                    @node.State
+                    @if (node.ActiveErrors.Count > 0)
+                    {
+                        <span class="badge bg-danger ms-2" data-bs-toggle="tooltip" data-bs-placement="top" title="@GetErrorsTooltip(node)">!</span>
+                    }
+                </td>
                 <td>@(node.Uptime is not null ? TimeSpan.FromSeconds(node.Uptime.Value).ToString("hh\\:mm\\:ss") : "-")</td>
                 <td>@(node.LastSeen is not null ? (DateTimeOffset.UtcNow - node.LastSeen.Value).ToString("hh\\:mm\\:ss") + " ago" : "-")</td>
                 <td>
@@ -66,12 +75,24 @@
                                         <input class="form-check-input" type="checkbox" role="switch" id="clock-@safeId" checked="@IsClockLeader(node)" @onchange="(e) => ToggleClockLeader(node, e)">
                                         <label class="form-check-label" for="clock-@safeId">Clock Leader</label>
                                     </div>
+                                    @if (node.ActiveErrors.ContainsKey("clock_leader"))
+                                    {
+                                        <button class="btn btn-link text-danger p-0" type="button" @onclick="() => RetryClockLeader(node)">
+                                            <span class="me-1">↻</span>Retry
+                                        </button>
+                                    }
                                 </li>
-                                <li>
+                                <li class="mb-2">
                                     <div class="form-check form-switch" @onclick:stopPropagation="true">
                                         <input class="form-check-input" type="checkbox" role="switch" id="imu-@safeId" checked="@IsImuHost(node)" @onchange="(e) => ToggleImuHost(node, e)">
                                         <label class="form-check-label" for="imu-@safeId">IMU Host</label>
                                     </div>
+                                    @if (node.ActiveErrors.ContainsKey("imu_host"))
+                                    {
+                                        <button class="btn btn-link text-danger p-0" type="button" @onclick="() => RetryImuHost(node)">
+                                            <span class="me-1">↻</span>Retry
+                                        </button>
+                                    }
                                 </li>
                             </ul>
                         </div>
@@ -88,17 +109,6 @@
     private readonly ConcurrentDictionary<string, byte> _cooldownKeys = new();
     private readonly ConcurrentDictionary<string, NodeConfiguration> _localConfigurations = new();
 
-    protected override void OnAfterRender(bool firstRender)
-    {
-        if (!firstRender || _timer is not null)
-        {
-            return;
-        }
-
-        _timer = new PeriodicTimer(TimeSpan.FromMilliseconds(333));
-        _ = UpdateLoop();
-    }
-
     private async Task UpdateLoop()
     {
         if (_timer is null)
@@ -110,6 +120,17 @@
         {
             await InvokeAsync(StateHasChanged).ConfigureAwait(false);
         }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && _timer is null)
+        {
+            _timer = new PeriodicTimer(TimeSpan.FromMilliseconds(333));
+            _ = UpdateLoop();
+        }
+
+        await JS.InvokeVoidAsync("initTooltips");
     }
 
     private bool IsDisabled(string key)
@@ -268,6 +289,19 @@
     private Task SendReboot(NodeStateViewModel node)
     {
         return SendCommandAsync(node, "reboot");
+    }
+
+    private static string GetErrorsTooltip(NodeStateViewModel node)
+        => string.Join("; ", node.ActiveErrors.Select(e => $"{e.Key}: {e.Value}"));
+
+    private Task RetryClockLeader(NodeStateViewModel node) => RetryFeatureAsync(node, "clock_leader");
+
+    private Task RetryImuHost(NodeStateViewModel node) => RetryFeatureAsync(node, "imu_host");
+
+    private async Task RetryFeatureAsync(NodeStateViewModel node, string feature)
+    {
+        _errorMessage = null;
+        await Store.RetryFeatureAsync(node, feature).ConfigureAwait(false);
     }
 
     public ValueTask DisposeAsync()

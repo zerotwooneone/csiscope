@@ -23,9 +23,12 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
     private readonly ILogger<CsiNodeStateStore> _logger;
     private readonly ConcurrentDictionary<string, NodeStateViewModel> _nodes = new();
     private readonly ConcurrentDictionary<string, DateTimeOffset> _lastRestore = new();
+    private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, string>> _activeErrors = new();
+    private readonly ConcurrentDictionary<string, HashSet<string>> _unavailableFeatures = new();
 
     private CancellationTokenSource? _cts;
-    private Task? _runTask;
+    private Task? _stateTask;
+    private Task? _payloadTask;
 
     public CsiNodeStateStore(
         CsiIngestionChannel channel,
@@ -63,11 +66,57 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
     public Task StartAsync(CancellationToken cancellationToken)
     {
         _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        _runTask = Task.Run(() => RunAsync(_cts.Token), _cts.Token);
+        _stateTask = Task.Run(() => ProcessStateAsync(_cts.Token), _cts.Token);
+        _payloadTask = Task.Run(() => ProcessPayloadsAsync(_cts.Token), _cts.Token);
         return Task.CompletedTask;
     }
 
-    private async Task RunAsync(CancellationToken cancellationToken)
+    public async Task RetryFeatureAsync(NodeStateViewModel node, string feature)
+    {
+        var key = node.Mac ?? node.Key;
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            return;
+        }
+
+        if (_activeErrors.TryGetValue(key, out var errors))
+        {
+            errors.TryRemove(feature, out _);
+        }
+
+        if (_unavailableFeatures.TryGetValue(key, out var unavailable))
+        {
+            unavailable.Remove(feature);
+        }
+
+        _configurationService.TryGetConfiguration(key, out var configuration);
+        if (configuration is null)
+        {
+            _logger.LogWarning("Cannot retry {Feature} for {Key}: no persisted configuration.", feature, key);
+            return;
+        }
+
+        _nodes.AddOrUpdate(
+            key,
+            _ => new NodeStateViewModel
+            {
+                Key = key,
+                PortName = node.PortName,
+                Mac = node.Mac,
+                State = node.State,
+                ActiveErrors = GetSnapshot(key),
+            },
+            (_, existing) =>
+            {
+                existing.ActiveErrors = GetSnapshot(key);
+                return existing;
+            });
+
+        _logger.LogInformation("User requested retry of {Feature} for {Key}.", feature, key);
+        await PushSetFeaturesAsync(node.PortName, key, configuration).ConfigureAwait(false);
+    }
+
+    private async Task ProcessStateAsync(CancellationToken cancellationToken)
     {
         try
         {
@@ -76,6 +125,11 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
                 var key = state.Mac ?? state.PortName;
 
                 _configurationService.TryGetConfiguration(state.Mac ?? string.Empty, out var existingConfig);
+
+                if (state.Mac is not null && state.State == NodeConnectionState.Disconnected)
+                {
+                    ClearErrors(state.Mac);
+                }
 
                 _nodes.AddOrUpdate(
                     key,
@@ -94,6 +148,107 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
         }
     }
 
+    private async Task ProcessPayloadsAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await foreach (var payload in _channel.PayloadReader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (payload.Type == "error")
+                {
+                    HandleErrorPayload(payload);
+                    continue;
+                }
+
+                if (payload.Type == "boot" && !string.IsNullOrWhiteSpace(payload.Mac))
+                {
+                    _logger.LogInformation("Node {Mac} reported boot; clearing active errors.", payload.Mac);
+                    ClearErrors(payload.Mac);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Expected on shutdown.
+        }
+    }
+
+    private void HandleErrorPayload(NodePayload payload)
+    {
+        if (string.IsNullOrWhiteSpace(payload.Mac) || payload.Cmd != "set_features")
+        {
+            return;
+        }
+
+        var feature = GetFeatureKey(payload);
+        if (feature is null)
+        {
+            _logger.LogWarning(
+                "Received set_features error with unknown feature from {Mac}: reason={Reason}.",
+                payload.Mac,
+                payload.Reason);
+            return;
+        }
+
+        var reason = payload.Reason ?? "unknown";
+
+        _activeErrors.AddOrUpdate(
+            payload.Mac,
+            _ => new ConcurrentDictionary<string, string>(new[] { new KeyValuePair<string, string>(feature, reason) }),
+            (_, d) =>
+            {
+                d[feature] = reason;
+                return d;
+            });
+
+        _unavailableFeatures.AddOrUpdate(
+            payload.Mac,
+            _ => new HashSet<string> { feature },
+            (_, s) =>
+            {
+                s.Add(feature);
+                return s;
+            });
+
+        _nodes.AddOrUpdate(
+            payload.Mac,
+            _ => new NodeStateViewModel
+            {
+                Key = payload.Mac,
+                PortName = payload.PortName ?? string.Empty,
+                Mac = payload.Mac,
+                State = NodeConnectionState.Standby,
+                ActiveErrors = GetSnapshot(payload.Mac),
+            },
+            (_, existing) =>
+            {
+                existing.ActiveErrors = GetSnapshot(payload.Mac);
+                return existing;
+            });
+
+        _logger.LogWarning(
+            "Feature {Feature} failed for {Mac} on {Port}: {Reason}.",
+            feature,
+            payload.Mac,
+            payload.PortName ?? "unknown",
+            reason);
+    }
+
+    private static string? GetFeatureKey(NodePayload payload)
+    {
+        if (!string.IsNullOrWhiteSpace(payload.Param))
+        {
+            return payload.Param;
+        }
+
+        return payload.Reason switch
+        {
+            "imu_init_failed" => "imu_host",
+            "sync_init_failed" => "clock_leader",
+            _ => null
+        };
+    }
+
     private NodeStateViewModel CreateViewModel(
         NodeStateChanged state,
         string key,
@@ -101,6 +256,28 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
         NodeStateViewModel? existing = null)
     {
         var mac = state.Mac ?? existing?.Mac;
+
+        if (mac is not null && configuration is not null)
+        {
+            if (state.ClockLeader.HasValue && state.ClockLeader.Value == configuration.ClockLeader)
+            {
+                _activeErrors.TryGetValue(mac, out var clockErrors);
+                clockErrors?.TryRemove("clock_leader", out _);
+                RemoveUnavailable(mac, "clock_leader");
+            }
+
+            if (state.ImuHost.HasValue && state.ImuHost.Value == configuration.ImuHost)
+            {
+                _activeErrors.TryGetValue(mac, out var imuErrors);
+                imuErrors?.TryRemove("imu_host", out _);
+                RemoveUnavailable(mac, "imu_host");
+            }
+
+            if (_activeErrors.TryGetValue(mac, out var errors) && errors.IsEmpty)
+            {
+                _activeErrors.TryRemove(mac, out _);
+            }
+        }
 
         return new NodeStateViewModel
         {
@@ -113,15 +290,47 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
             ClockLeader = state.ClockLeader,
             ImuHost = state.ImuHost,
             Configuration = configuration,
+            ActiveErrors = mac is not null ? GetSnapshot(mac) : existing?.ActiveErrors ?? new Dictionary<string, string>(),
         };
     }
+
+    private static Dictionary<string, string> GetSnapshot(ConcurrentDictionary<string, ConcurrentDictionary<string, string>> source, string mac)
+    {
+        if (!source.TryGetValue(mac, out var errors) || errors is null)
+        {
+            return new Dictionary<string, string>();
+        }
+
+        return new Dictionary<string, string>(errors);
+    }
+
+    private Dictionary<string, string> GetSnapshot(string mac)
+        => GetSnapshot(_activeErrors, mac);
+
+    private void ClearErrors(string mac)
+    {
+        _activeErrors.TryRemove(mac, out _);
+        _unavailableFeatures.TryRemove(mac, out _);
+        _lastRestore.TryRemove(mac, out _);
+    }
+
+    private void RemoveUnavailable(string mac, string feature)
+    {
+        if (_unavailableFeatures.TryGetValue(mac, out var features))
+        {
+            features.Remove(feature);
+        }
+    }
+
+    private bool IsUnavailable(string mac, string feature)
+        => _unavailableFeatures.TryGetValue(mac, out var features) && features.Contains(feature);
 
     private async Task TryRestoreFeaturesAsync(
         NodeStateChanged state,
         NodeConfiguration? configuration,
         CancellationToken cancellationToken)
     {
-        if (configuration is null || state.Mac is null)
+        if (configuration is null || state.Mac is null || !ShouldRestore(state, configuration))
         {
             return;
         }
@@ -133,7 +342,11 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
         }
 
         _lastRestore.AddOrUpdate(state.Mac, now, (_, _) => now);
+        await PushSetFeaturesAsync(state.PortName, state.Mac, configuration).ConfigureAwait(false);
+    }
 
+    private async Task PushSetFeaturesAsync(string portName, string mac, NodeConfiguration configuration)
+    {
         var json = JsonSerializer.Serialize(new
         {
             cmd = "set_features",
@@ -141,66 +354,71 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
             imu_host = configuration.ImuHost,
         });
 
-        if (!_portManager.TrySendCommand(state.PortName, json))
+        if (!_portManager.TrySendCommand(portName, json))
         {
             _logger.LogWarning(
-                "Failed to auto-restore feature flags to {Mac} on {Port}.",
-                state.Mac,
-                state.PortName);
+                "Failed to push feature flags to {Mac} on {Port}.",
+                mac,
+                portName);
 
-            _lastRestore.TryRemove(state.Mac, out _);
+            _lastRestore.TryRemove(mac, out _);
             return;
         }
 
         _logger.LogInformation(
-            "Auto-restored feature flags to {Mac} on {Port} (clock_leader={ClockLeader}, imu_host={ImuHost}).",
-            state.Mac,
-            state.PortName,
+            "Pushed feature flags to {Mac} on {Port} (clock_leader={ClockLeader}, imu_host={ImuHost}).",
+            mac,
+            portName,
             configuration.ClockLeader,
             configuration.ImuHost);
+
+        await Task.CompletedTask;
     }
 
-    private static bool ShouldRestore(NodeStateChanged state, NodeConfiguration? configuration)
+    private bool ShouldRestore(NodeStateChanged state, NodeConfiguration? configuration)
     {
         if (configuration is null || state.Mac is null)
         {
             return false;
         }
 
-        // If the heartbeat reports feature flags, correct any drift from the persisted config.
-        if (state.ClockLeader.HasValue && state.ClockLeader.Value != configuration.ClockLeader)
-        {
-            return true;
-        }
+        bool clockMismatch = state.ClockLeader.HasValue && state.ClockLeader.Value != configuration.ClockLeader;
+        bool imuMismatch = state.ImuHost.HasValue && state.ImuHost.Value != configuration.ImuHost;
 
-        if (state.ImuHost.HasValue && state.ImuHost.Value != configuration.ImuHost)
-        {
-            return true;
-        }
+        bool clockUnavailable = IsUnavailable(state.Mac, "clock_leader");
+        bool imuUnavailable = IsUnavailable(state.Mac, "imu_host");
 
-        return false;
+        return (clockMismatch && !clockUnavailable) || (imuMismatch && !imuUnavailable);
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
         _cts?.Cancel();
 
-        if (_runTask is not null)
-        {
-            try
-            {
-                await _runTask.WaitAsync(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-            }
-            catch (TimeoutException)
-            {
-            }
-        }
+        await WaitForTaskAsync(_stateTask, cancellationToken).ConfigureAwait(false);
+        await WaitForTaskAsync(_payloadTask, cancellationToken).ConfigureAwait(false);
 
         _cts?.Dispose();
         _cts = null;
+    }
+
+    private static async Task WaitForTaskAsync(Task? task, CancellationToken cancellationToken)
+    {
+        if (task is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await task.WaitAsync(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (TimeoutException)
+        {
+        }
     }
 
     public ValueTask DisposeAsync()

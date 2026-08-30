@@ -42,4 +42,9 @@ public sealed class NodeStateViewModel
     /// The persistent hardware configuration for this node, if one exists.
     /// </summary>
     public NodeConfiguration? Configuration { get; set; }
+
+    /// <summary>
+    /// Active hardware feature errors keyed by feature name (clock_leader / imu_host).
+    /// </summary>
+    public Dictionary<string, string> ActiveErrors { get; set; } = new();
 }

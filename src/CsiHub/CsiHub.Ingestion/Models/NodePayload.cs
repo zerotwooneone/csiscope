@@ -17,6 +17,15 @@ public sealed class NodePayload
 
     public string? State { get; set; }
 
+    public string? Cmd { get; set; }
+
+    /// <summary>
+    /// The failing feature or command parameter, e.g. "imu_host".
+    /// </summary>
+    public string? Param { get; set; }
+
+    public string? Reason { get; set; }
+
     public bool? ClockLeader { get; set; }
 
     public bool? ImuHost { get; set; }

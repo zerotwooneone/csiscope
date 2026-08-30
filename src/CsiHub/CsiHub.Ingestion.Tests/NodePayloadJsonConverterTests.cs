@@ -47,6 +47,20 @@ public class NodePayloadJsonConverterTests
     }
 
     [Fact]
+    public void Can_Parse_Error_Payload_With_Param()
+    {
+        const string json = """{"type":"error","cmd":"set_features","param":"imu_host","reason":"init_failed"}""";
+
+        var payload = JsonSerializer.Deserialize<NodePayload>(json);
+
+        Assert.NotNull(payload);
+        Assert.Equal("error", payload.Type);
+        Assert.Equal("set_features", payload.Cmd);
+        Assert.Equal("imu_host", payload.Param);
+        Assert.Equal("init_failed", payload.Reason);
+    }
+
+    [Fact]
     public void Can_Parse_Heartbeat_Only_Type()
     {
         const string json = """{"type":"hb"}""";

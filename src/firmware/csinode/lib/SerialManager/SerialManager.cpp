@@ -242,9 +242,18 @@ void SerialManager::parseAndDispatch(const char* line)
         bool syncOk = SyncManager::apply(clockLeader);
         bool imuOk = ImuManager::apply(imuHost);
 
+        if (!syncOk)
+        {
+            sendError("set_features", "sync_init_failed", "clock_leader");
+        }
+
+        if (!imuOk)
+        {
+            sendError("set_features", "imu_init_failed", "imu_host");
+        }
+
         if (!syncOk || !imuOk)
         {
-            sendError("set_features", syncOk ? "imu_init_failed" : "sync_init_failed");
             return;
         }
 
@@ -298,13 +307,18 @@ void SerialManager::sendAck(const char* cmd, bool success, const char* reason)
     Serial.println();
 }
 
-void SerialManager::sendError(const char* cmd, const char* reason)
+void SerialManager::sendError(const char* cmd, const char* reason, const char* param)
 {
     static JsonDocument doc;
     doc.clear();
     doc["type"] = "error";
     doc["cmd"] = cmd;
     doc["reason"] = reason;
+
+    if (param != nullptr)
+    {
+        doc["param"] = param;
+    }
 
     serializeJson(doc, Serial);
     Serial.println();

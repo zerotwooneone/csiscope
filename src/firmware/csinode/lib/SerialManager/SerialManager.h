@@ -30,5 +30,5 @@ private:
 
     static void sendConfig();
     static void sendAck(const char* cmd, bool success, const char* reason = nullptr);
-    static void sendError(const char* cmd, const char* reason);
+    static void sendError(const char* cmd, const char* reason, const char* param = nullptr);
 };
