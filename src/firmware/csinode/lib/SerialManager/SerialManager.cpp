@@ -2,6 +2,7 @@
 #include "config.h"
 #include "HardwareDiagnostics.h"
 #include "ImuManager.h"
+#include "RfManager.h"
 #include "SyncManager.h"
 
 #include <cstring>
@@ -172,15 +173,51 @@ void SerialManager::parseAndDispatch(const char* line)
     else if (strcmp(cmd, "diag_test") == 0)
     {
         const char* type = doc["type"];
-        if (!type || strcmp(type, "sync") != 0)
+        if (!type)
         {
             sendError("diag_test", "missing_or_invalid_type");
             return;
         }
 
-        currentState = SystemState::STATE_DIAG_SYNC;
+        if (strcmp(type, "sync") == 0)
+        {
+            currentState = SystemState::STATE_DIAG_SYNC;
+            HardwareDiagnostics::setLedState(currentState);
+            sendAck("diag_test", true);
+        }
+        else if (strcmp(type, "rf") == 0)
+        {
+            currentState = SystemState::STATE_DIAG_RF;
+            HardwareDiagnostics::setLedState(currentState);
+            RfManager::startSweep();
+            sendAck("diag_test", true);
+        }
+        else
+        {
+            sendError("diag_test", "unknown_type");
+        }
+    }
+    else if (strcmp(cmd, "set_rf") == 0)
+    {
+        int ch = doc["ch"] | 0;
+        if (ch < 1 || ch > 13)
+        {
+            sendError("set_rf", "invalid_channel");
+            return;
+        }
+
+        currentState = SystemState::STATE_DIAG_RF;
         HardwareDiagnostics::setLedState(currentState);
-        sendAck("diag_test", true);
+
+        int dwellMs = doc["dwell_ms"] | 250;
+        if (dwellMs < 50 || dwellMs > 5000)
+        {
+            sendError("set_rf", "invalid_dwell");
+            return;
+        }
+
+        RfManager::startSingleChannelScan(static_cast<uint8_t>(ch), static_cast<uint16_t>(dwellMs));
+        sendAck("set_rf", true);
     }
     else if (strcmp(cmd, "set_features") == 0)
     {

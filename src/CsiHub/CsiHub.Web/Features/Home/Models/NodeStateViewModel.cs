@@ -52,4 +52,9 @@ public sealed class NodeStateViewModel
     /// Active hardware feature errors keyed by feature name (clock_leader / imu_host).
     /// </summary>
     public Dictionary<string, string> ActiveErrors { get; set; } = new();
+
+    /// <summary>
+    /// Latest RF scan results keyed by channel, populated from <c>rf_scan</c> payloads.
+    /// </summary>
+    public Dictionary<int, RfChannelMetrics> RfScan { get; set; } = new();
 }

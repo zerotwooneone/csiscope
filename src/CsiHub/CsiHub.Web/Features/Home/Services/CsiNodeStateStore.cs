@@ -25,6 +25,12 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
     private readonly ConcurrentDictionary<string, DateTimeOffset> _lastRestore = new();
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, string>> _activeErrors = new();
     private readonly ConcurrentDictionary<string, HashSet<string>> _unavailableFeatures = new();
+    private readonly ConcurrentDictionary<string, Dictionary<int, RfChannelMetrics>> _rfScanResults = new();
+    private readonly ConcurrentDictionary<int, RfChannelAggregate> _combinedRfScan = new();
+    private readonly ConcurrentDictionary<string, ConcurrentQueue<int>> _sweepAssignments = new();
+    private readonly ConcurrentDictionary<string, int> _sweepAwaiting = new();
+    private TaskCompletionSource? _sweepTcs;
+    private int _sweepDwellMs = 250;
 
     private CancellationTokenSource? _cts;
     private Task? _stateTask;
@@ -48,6 +54,16 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
     public IReadOnlyDictionary<string, NodeStateViewModel> Nodes => _nodes;
 
     /// <summary>
+    /// Combined 1-13 RF scan results aggregated from all participating nodes.
+    /// </summary>
+    public IReadOnlyDictionary<int, RfChannelAggregate> CombinedRfScan => _combinedRfScan;
+
+    /// <summary>
+    /// True while a distributed RF sweep is in progress.
+    /// </summary>
+    public bool IsDistributedSweepActive { get; private set; }
+
+    /// <summary>
     /// Attempts to look up the COM port associated with a node, using its
     /// MAC address or fallback key. Returns true when the node is known.
     /// </summary>
@@ -61,6 +77,95 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
 
         portName = null;
         return false;
+    }
+
+    /// <summary>
+    /// Returns the MAC addresses of all currently connected nodes.
+    /// </summary>
+    public IReadOnlyCollection<string> GetConnectedMacs()
+    {
+        return _nodes.Values
+            .Where(n => !n.IsDisconnected && !string.IsNullOrWhiteSpace(n.Mac))
+            .Select(n => n.Mac!)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Starts a parallel 1-13 RF sweep across the supplied MAC addresses.
+    /// Channels are round-robined across the nodes; the host waits for each
+    /// <c>rf_scan</c> payload before sending the next channel in a node's queue.
+    /// </summary>
+    public Task StartDistributedSweepAsync(
+        IReadOnlyCollection<string> macs,
+        int dwellMs = 250,
+        CancellationToken cancellationToken = default)
+    {
+        if (macs.Count == 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        StopDistributedSweep();
+
+        _sweepDwellMs = dwellMs;
+        _combinedRfScan.Clear();
+        _sweepAssignments.Clear();
+        _sweepAwaiting.Clear();
+
+        var channels = Enumerable.Range(1, 13).ToList();
+        var macList = macs.ToList();
+
+        for (int i = 0; i < channels.Count; i++)
+        {
+            var mac = macList[i % macList.Count];
+            _sweepAssignments.AddOrUpdate(
+                mac,
+                _ => new ConcurrentQueue<int>(new[] { channels[i] }),
+                (_, existing) =>
+                {
+                    existing.Enqueue(channels[i]);
+                    return existing;
+                });
+        }
+
+        _sweepTcs = new TaskCompletionSource();
+        cancellationToken.Register(() =>
+        {
+            StopDistributedSweep();
+            _sweepTcs?.TrySetCanceled();
+        });
+
+        IsDistributedSweepActive = true;
+
+        foreach (var mac in macList)
+        {
+            if (_sweepAssignments.TryGetValue(mac, out var queue) && queue.TryPeek(out var firstChannel))
+            {
+                if (TrySendSetRf(mac, firstChannel, _sweepDwellMs))
+                {
+                    _sweepAwaiting[mac] = firstChannel;
+                }
+                else
+                {
+                    _logger.LogWarning("Failed to send initial set_rf to {Mac}; removing this node from the sweep.", mac);
+                    _sweepAssignments.TryRemove(mac, out _);
+                }
+            }
+        }
+
+        return _sweepTcs.Task;
+    }
+
+    /// <summary>
+    /// Cancels an in-progress distributed RF sweep.
+    /// </summary>
+    public void StopDistributedSweep()
+    {
+        IsDistributedSweepActive = false;
+        _sweepAssignments.Clear();
+        _sweepAwaiting.Clear();
+        _sweepTcs?.TrySetCanceled();
+        _sweepTcs = null;
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
@@ -178,6 +283,38 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
                 {
                     _logger.LogInformation("Node {Mac} reported boot; clearing active errors.", payload.Mac);
                     ClearErrors(payload.Mac);
+                    _rfScanResults.TryRemove(payload.Mac, out _);
+                }
+
+                if (payload.Type == "rf_scan" && !string.IsNullOrWhiteSpace(payload.Mac) && payload.Rf is not null)
+                {
+                    _rfScanResults.AddOrUpdate(
+                        payload.Mac,
+                        _ => new Dictionary<int, RfChannelMetrics> { [payload.Rf.Channel] = payload.Rf },
+                        (_, existing) =>
+                        {
+                            existing[payload.Rf.Channel] = payload.Rf;
+                            return existing;
+                        });
+
+                    _nodes.AddOrUpdate(
+                        payload.Mac,
+                        _ => new NodeStateViewModel
+                        {
+                            Key = payload.Mac,
+                            PortName = payload.PortName ?? string.Empty,
+                            Mac = payload.Mac,
+                            State = NodeConnectionState.Standby,
+                            RfScan = GetRfSnapshot(payload.Mac),
+                        },
+                        (_, existing) =>
+                        {
+                            existing.RfScan = GetRfSnapshot(payload.Mac);
+                            return existing;
+                        });
+
+                    AggregateRfScan(payload.Rf);
+                    AggregateAndAdvanceSweep(payload);
                 }
             }
         }
@@ -306,6 +443,7 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
             Bandwidth = state.Bandwidth ?? configuration?.Bandwidth ?? existing?.Bandwidth,
             Configuration = configuration,
             ActiveErrors = mac is not null ? GetSnapshot(mac) : existing?.ActiveErrors ?? new Dictionary<string, string>(),
+            RfScan = mac is not null ? GetRfSnapshot(mac) : existing?.RfScan ?? new Dictionary<int, RfChannelMetrics>(),
         };
     }
 
@@ -321,6 +459,16 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
 
     private Dictionary<string, string> GetSnapshot(string mac)
         => GetSnapshot(_activeErrors, mac);
+
+    private Dictionary<int, RfChannelMetrics> GetRfSnapshot(string mac)
+    {
+        if (!_rfScanResults.TryGetValue(mac, out var results))
+        {
+            return new Dictionary<int, RfChannelMetrics>();
+        }
+
+        return new Dictionary<int, RfChannelMetrics>(results);
+    }
 
     private void ClearErrors(string mac)
     {
@@ -404,6 +552,95 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
         bool imuUnavailable = IsUnavailable(state.Mac, "imu_host");
 
         return (clockMismatch && !clockUnavailable) || (imuMismatch && !imuUnavailable);
+    }
+
+    private void AggregateRfScan(RfChannelMetrics metrics)
+    {
+        _combinedRfScan.AddOrUpdate(
+            metrics.Channel,
+            _ => new RfChannelAggregate
+            {
+                Channel = metrics.Channel,
+                RssiMin = metrics.RssiMin,
+                RssiMax = metrics.RssiMax,
+                RssiAvg = metrics.RssiAvg,
+                Packets = metrics.Packets,
+                Errors = metrics.Errors,
+                DurationMs = metrics.DurationMs,
+                SampleCount = 1
+            },
+            (_, existing) => Merge(existing, metrics));
+    }
+
+    private static RfChannelAggregate Merge(RfChannelAggregate existing, RfChannelMetrics metrics)
+    {
+        var packets = existing.Packets + metrics.Packets;
+        var rssiAvg = packets > 0
+            ? ((existing.RssiAvg * existing.Packets) + (metrics.RssiAvg * metrics.Packets)) / packets
+            : 0.0;
+
+        return new RfChannelAggregate
+        {
+            Channel = existing.Channel,
+            RssiMin = Math.Min(existing.RssiMin, metrics.RssiMin),
+            RssiMax = Math.Max(existing.RssiMax, metrics.RssiMax),
+            RssiAvg = rssiAvg,
+            Packets = packets,
+            Errors = existing.Errors + metrics.Errors,
+            DurationMs = Math.Max(existing.DurationMs, metrics.DurationMs),
+            SampleCount = existing.SampleCount + 1
+        };
+    }
+
+    private void AggregateAndAdvanceSweep(NodePayload payload)
+    {
+        if (payload.Mac is null || payload.Rf is null)
+        {
+            return;
+        }
+
+        if (!_sweepAwaiting.TryGetValue(payload.Mac, out var expectedChannel) || expectedChannel != payload.Rf.Channel)
+        {
+            return;
+        }
+
+        _sweepAwaiting.TryRemove(payload.Mac, out _);
+
+        if (_sweepAssignments.TryGetValue(payload.Mac, out var queue))
+        {
+            queue.TryDequeue(out _);
+        }
+
+        if (_sweepAssignments.TryGetValue(payload.Mac, out queue) && queue.TryPeek(out var nextChannel))
+        {
+            if (TrySendSetRf(payload.Mac, nextChannel, _sweepDwellMs))
+            {
+                _sweepAwaiting[payload.Mac] = nextChannel;
+            }
+            else
+            {
+                _logger.LogWarning("Failed to send set_rf ch {Channel} to {Mac}; removing this node from the sweep.", nextChannel, payload.Mac);
+                _sweepAssignments.TryRemove(payload.Mac, out _);
+            }
+        }
+
+        if (_sweepAwaiting.IsEmpty && _sweepAssignments.All(kv => kv.Value.IsEmpty))
+        {
+            IsDistributedSweepActive = false;
+            _sweepTcs?.TrySetResult();
+            _sweepTcs = null;
+        }
+    }
+
+    private bool TrySendSetRf(string mac, int channel, int dwellMs)
+    {
+        if (!TryGetPortName(mac, out var portName) || string.IsNullOrWhiteSpace(portName))
+        {
+            return false;
+        }
+
+        var json = JsonSerializer.Serialize(new { cmd = "set_rf", ch = channel, dwell_ms = dwellMs });
+        return _portManager.TrySendCommand(portName, json);
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)

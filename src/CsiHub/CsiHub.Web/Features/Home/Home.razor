@@ -23,6 +23,17 @@
     </div>
 }
 
+<div class="d-flex gap-2 mb-3">
+    <button class="btn btn-primary" type="button" disabled="@Store.IsDistributedSweepActive" @onclick="StartDistributedRfScan">
+        @(Store.IsDistributedSweepActive ? "Distributed RF Sweep Running..." : "Run Distributed RF Sweep")
+    </button>
+    <button class="btn btn-outline-primary" type="button" @onclick="ShowAggregateModal">View Aggregate RF Scan</button>
+    @if (Store.IsDistributedSweepActive)
+    {
+        <button class="btn btn-outline-danger" type="button" @onclick="Store.StopDistributedSweep">Cancel Sweep</button>
+    }
+</div>
+
 <table class="table">
     <thead>
         <tr>
@@ -57,6 +68,8 @@
                             </button>
                             <ul class="dropdown-menu">
                                 <li><button class="dropdown-item" type="button" @onclick="() => SendSyncTest(node)">Sync Test</button></li>
+                                <li><button class="dropdown-item" type="button" @onclick="() => SendRfScan(node)">Run RF Scan</button></li>
+                                <li><button class="dropdown-item" type="button" @onclick="() => OpenRfModal(node)">RF Channel Override</button></li>
                                 <li><button class="dropdown-item" type="button" @onclick="() => SendReboot(node)">Reboot</button></li>
                             </ul>
                         </div>
@@ -103,9 +116,112 @@
     </tbody>
 </table>
 
+@if (_selectedNode is not null)
+{
+    var safeId = GetSafeId(_selectedNode);
+    var maxPackets = _selectedNode.RfScan.Count > 0 ? _selectedNode.RfScan.Values.Max(r => r.Packets) : 0.0;
+
+    <div class="modal show d-block" tabindex="-1" style="background-color: rgba(0, 0, 0, 0.5);" @onclick="CloseRfModal">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable" @onclick:stopPropagation="true">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">RF Scan - @(_selectedNode.Mac ?? _selectedNode.PortName)</h5>
+                    <button type="button" class="btn-close" aria-label="Close" @onclick="CloseRfModal"></button>
+                </div>
+                <div class="modal-body">
+                    @if (_selectedNode.RfScan.Count > 0)
+                    {
+                        <h6 class="mb-3">Channel Congestion</h6>
+                        @foreach (var channel in _selectedNode.RfScan.Values.OrderBy(r => r.Channel))
+                        {
+                            <div class="d-flex align-items-center mb-2">
+                                <div class="text-end me-2" style="width: 3rem;">Ch @channel.Channel</div>
+                                <div class="progress flex-grow-1" style="height: 1.5rem;">
+                                    <div class="progress-bar" role="progressbar" style="width: @(GetRfBarWidth(channel, maxPackets).ToString("F1"))%" title="RSSI min/max/avg: @channel.RssiMin / @channel.RssiMax / @channel.RssiAvg dBm, @channel.Errors errors">
+                                    </div>
+                                </div>
+                                <div class="ms-2 text-muted" style="width: 7rem;">@channel.Packets pkts</div>
+                            </div>
+                        }
+                    }
+                    else
+                    {
+                        <p class="text-muted">No RF scan data available. Click <strong>Run RF Scan</strong> to collect channel metrics.</p>
+                    }
+
+                    <hr />
+
+                    <div class="row g-3 align-items-center">
+                        <div class="col-auto">
+                            <label for="rf-channel-@safeId" class="col-form-label">Manual channel override</label>
+                        </div>
+                        <div class="col-auto">
+                            <select id="rf-channel-@safeId" class="form-select" @bind="_manualChannel">
+                                @for (int ch = 1; ch <= 13; ch++)
+                                {
+                                    <option value="@ch">@ch</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-auto">
+                            <button class="btn btn-primary" type="button" @onclick="SendSetRf">Set Channel</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" type="button" @onclick="CloseRfModal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@if (_showAggregate)
+{
+    var maxPackets = Store.CombinedRfScan.Count > 0 ? Store.CombinedRfScan.Values.Max(r => r.Packets) : 0.0;
+
+    <div class="modal show d-block" tabindex="-1" style="background-color: rgba(0, 0, 0, 0.5);" @onclick="CloseAggregateModal">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable" @onclick:stopPropagation="true">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Aggregate RF Scan (1-13)</h5>
+                    <button type="button" class="btn-close" aria-label="Close" @onclick="CloseAggregateModal"></button>
+                </div>
+                <div class="modal-body">
+                    @if (Store.CombinedRfScan.Count > 0)
+                    {
+                        <h6 class="mb-3">Combined Channel Congestion</h6>
+                        @foreach (var channel in Store.CombinedRfScan.Values.OrderBy(r => r.Channel))
+                        {
+                            <div class="d-flex align-items-center mb-2">
+                                <div class="text-end me-2" style="width: 3rem;">Ch @channel.Channel</div>
+                                <div class="progress flex-grow-1" style="height: 1.5rem;">
+                                    <div class="progress-bar" role="progressbar" style="width: @(GetRfBarWidth(channel, maxPackets).ToString("F1"))%" title="RSSI min/max/avg: @channel.RssiMin / @channel.RssiMax / @channel.RssiAvg dBm, @channel.Errors errors, @channel.SampleCount nodes">
+                                    </div>
+                                </div>
+                                <div class="ms-2 text-muted" style="width: 7rem;">@channel.Packets pkts</div>
+                            </div>
+                        }
+                    }
+                    else
+                    {
+                        <p class="text-muted">No aggregate RF scan data available. Run a distributed RF sweep to collect a complete 1-13 channel map.</p>
+                    }
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" type="button" @onclick="CloseAggregateModal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
 @code {
     private PeriodicTimer? _timer;
     private string? _errorMessage;
+    private NodeStateViewModel? _selectedNode;
+    private bool _showAggregate;
+    private int _manualChannel = 6;
     private readonly ConcurrentDictionary<string, byte> _cooldownKeys = new();
     private readonly ConcurrentDictionary<string, NodeConfiguration> _localConfigurations = new();
 
@@ -286,6 +402,110 @@
         return SendCommandAsync(node, "diag_test", "sync");
     }
 
+    private Task SendRfScan(NodeStateViewModel node)
+    {
+        return SendCommandAsync(node, "diag_test", "rf");
+    }
+
+    private void OpenRfModal(NodeStateViewModel node)
+    {
+        _selectedNode = node;
+        _manualChannel = node.RfScan.Count > 0
+            ? node.RfScan.Values.OrderByDescending(r => r.Packets).First().Channel
+            : 6;
+    }
+
+    private void CloseRfModal()
+    {
+        _selectedNode = null;
+    }
+
+    private void ShowAggregateModal()
+    {
+        _showAggregate = true;
+    }
+
+    private void CloseAggregateModal()
+    {
+        _showAggregate = false;
+    }
+
+    private async Task StartDistributedRfScan()
+    {
+        _errorMessage = null;
+
+        var macs = Store.GetConnectedMacs();
+        if (macs.Count == 0)
+        {
+            _errorMessage = "No connected nodes available for a distributed RF sweep.";
+            return;
+        }
+
+        try
+        {
+            await Store.StartDistributedSweepAsync(macs, 250).ConfigureAwait(false);
+            _errorMessage = null;
+        }
+        catch (OperationCanceledException)
+        {
+            _errorMessage = "Distributed RF sweep was cancelled.";
+        }
+    }
+
+    private async Task SendSetRf()
+    {
+        var node = _selectedNode;
+        if (node is null)
+        {
+            return;
+        }
+
+        var key = node.Key;
+
+        if (!_cooldownKeys.TryAdd(key, 0))
+        {
+            return;
+        }
+
+        try
+        {
+            if (node.IsDisconnected)
+            {
+                _errorMessage = $"Cannot send set_rf to {node.PortName}: node is disconnected.";
+                return;
+            }
+
+            if (!Store.TryGetPortName(key, out var portName) || string.IsNullOrWhiteSpace(portName))
+            {
+                _errorMessage = $"Cannot send set_rf to {node.Mac ?? node.PortName}: port not found.";
+                return;
+            }
+
+            var json = JsonSerializer.Serialize(new { cmd = "set_rf", ch = _manualChannel });
+
+            if (!PortManager.TrySendCommand(portName, json))
+            {
+                _errorMessage = $"Failed to send set_rf to {portName}: channel is closed.";
+                return;
+            }
+
+            _selectedNode = null;
+        }
+        finally
+        {
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(2000).ConfigureAwait(false);
+                _cooldownKeys.TryRemove(key, out _);
+                await InvokeAsync(() =>
+                {
+                    _errorMessage = null;
+                    StateHasChanged();
+                }).ConfigureAwait(false);
+            });
+        }
+    }
+
     private Task SendReboot(NodeStateViewModel node)
     {
         return SendCommandAsync(node, "reboot");
@@ -293,6 +513,26 @@
 
     private static string GetErrorsTooltip(NodeStateViewModel node)
         => string.Join("; ", node.ActiveErrors.Select(e => $"{e.Key}: {e.Value}"));
+
+    private static double GetRfBarWidth(RfChannelMetrics metrics, double maxPackets)
+    {
+        if (maxPackets <= 0 || metrics.Packets <= 0)
+        {
+            return 0.0;
+        }
+
+        return Math.Min(100.0, metrics.Packets * 100.0 / maxPackets);
+    }
+
+    private static double GetRfBarWidth(RfChannelAggregate aggregate, double maxPackets)
+    {
+        if (maxPackets <= 0 || aggregate.Packets <= 0)
+        {
+            return 0.0;
+        }
+
+        return Math.Min(100.0, aggregate.Packets * 100.0 / maxPackets);
+    }
 
     private Task RetryClockLeader(NodeStateViewModel node) => RetryFeatureAsync(node, "clock_leader");
 

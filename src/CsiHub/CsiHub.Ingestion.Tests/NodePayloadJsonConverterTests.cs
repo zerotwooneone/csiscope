@@ -125,6 +125,28 @@ public class NodePayloadJsonConverterTests
     }
 
     [Fact]
+    public void Can_Parse_Rf_Scan_Payload()
+    {
+        const string json = """{"type":"rf_scan","mac":"AA:BB:CC:DD:EE:FF","ch":6,"rssi_min":-80,"rssi_max":-40,"rssi_avg":-62.5,"packets":42,"errors":3,"duration_ms":500,"timestamp":12345}""";
+
+        var payload = JsonSerializer.Deserialize<NodePayload>(json);
+
+        Assert.NotNull(payload);
+        Assert.Equal("rf_scan", payload.Type);
+        Assert.Equal("AA:BB:CC:DD:EE:FF", payload.Mac);
+        Assert.Equal(12345L, payload.Timestamp);
+
+        Assert.NotNull(payload.Rf);
+        Assert.Equal(6, payload.Rf.Channel);
+        Assert.Equal(-80.0, payload.Rf.RssiMin);
+        Assert.Equal(-40.0, payload.Rf.RssiMax);
+        Assert.Equal(-62.5, payload.Rf.RssiAvg);
+        Assert.Equal(42L, payload.Rf.Packets);
+        Assert.Equal(3L, payload.Rf.Errors);
+        Assert.Equal(500, payload.Rf.DurationMs);
+    }
+
+    [Fact]
     public void Ignores_Unknown_Properties()
     {
         const string json = """{"type":"ack","cmd":"set_features","success":true,"state":"standby"}""";

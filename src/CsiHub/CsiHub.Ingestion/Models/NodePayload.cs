@@ -40,6 +40,11 @@ public sealed class NodePayload
     public double[]? Imu { get; set; }
 
     /// <summary>
+    /// RF scan metrics for a single channel, present when <see cref="Type"/> is "rf_scan".
+    /// </summary>
+    public RfChannelMetrics? Rf { get; set; }
+
+    /// <summary>
     /// The host-local time the payload was received.
     /// </summary>
     public DateTimeOffset ReceivedAt { get; set; }

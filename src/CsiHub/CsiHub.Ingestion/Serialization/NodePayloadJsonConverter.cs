@@ -109,6 +109,55 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
                     payload.Imu = ReadDoubleArray(ref reader);
                     break;
 
+                case "ch":
+                    if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt32(out var ch))
+                    {
+                        EnsureRf(payload).Channel = ch;
+                    }
+                    break;
+
+                case "rssi_min":
+                    if (reader.TokenType == JsonTokenType.Number && reader.TryGetDouble(out var rssiMin))
+                    {
+                        EnsureRf(payload).RssiMin = rssiMin;
+                    }
+                    break;
+
+                case "rssi_max":
+                    if (reader.TokenType == JsonTokenType.Number && reader.TryGetDouble(out var rssiMax))
+                    {
+                        EnsureRf(payload).RssiMax = rssiMax;
+                    }
+                    break;
+
+                case "rssi_avg":
+                    if (reader.TokenType == JsonTokenType.Number && reader.TryGetDouble(out var rssiAvg))
+                    {
+                        EnsureRf(payload).RssiAvg = rssiAvg;
+                    }
+                    break;
+
+                case "packets":
+                    if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt64(out var packets))
+                    {
+                        EnsureRf(payload).Packets = packets;
+                    }
+                    break;
+
+                case "errors":
+                    if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt64(out var errors))
+                    {
+                        EnsureRf(payload).Errors = errors;
+                    }
+                    break;
+
+                case "duration_ms":
+                    if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt32(out var durationMs))
+                    {
+                        EnsureRf(payload).DurationMs = durationMs;
+                    }
+                    break;
+
                 default:
                     reader.Skip();
                     break;
@@ -116,6 +165,11 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
         }
 
         return payload;
+    }
+
+    private static RfChannelMetrics EnsureRf(NodePayload payload)
+    {
+        return payload.Rf ??= new RfChannelMetrics();
     }
 
     private static double[]? ReadDoubleArray(ref Utf8JsonReader reader)
@@ -236,6 +290,17 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
         {
             writer.WritePropertyName("imu");
             JsonSerializer.Serialize(writer, value.Imu, options);
+        }
+
+        if (value.Rf is not null)
+        {
+            writer.WriteNumber("ch", value.Rf.Channel);
+            writer.WriteNumber("rssi_min", value.Rf.RssiMin);
+            writer.WriteNumber("rssi_max", value.Rf.RssiMax);
+            writer.WriteNumber("rssi_avg", value.Rf.RssiAvg);
+            writer.WriteNumber("packets", value.Rf.Packets);
+            writer.WriteNumber("errors", value.Rf.Errors);
+            writer.WriteNumber("duration_ms", value.Rf.DurationMs);
         }
 
         writer.WriteEndObject();

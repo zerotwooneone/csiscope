@@ -5,6 +5,7 @@
 #include "HardwareDiagnostics.h"
 #include "ImuManager.h"
 #include "LedManager.h"
+#include "RfManager.h"
 #include "SerialManager.h"
 #include "SyncManager.h"
 
@@ -29,6 +30,7 @@ void setup()
   LedManager::begin();
   SyncManager::begin();
   ImuManager::begin();
+  RfManager::begin();
 
   HardwareDiagnostics::setLedState(currentState);
   nodeMacAddress = HardwareDiagnostics::getMacAddress();
@@ -105,6 +107,10 @@ void loop()
         Serial.println();
       }
     }
+    break;
+
+  case SystemState::STATE_DIAG_RF:
+    RfManager::update();
     break;
 
   default:
