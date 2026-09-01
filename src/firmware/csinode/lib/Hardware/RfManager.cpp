@@ -4,8 +4,8 @@
 #include "protocol_types.h"
 #include <algorithm>
 #include <ArduinoJson.h>
+#include <array>
 #include <cstdio>
-#include <vector>
 
 // Global state from main.cpp
 extern SystemState currentState;
@@ -173,7 +173,8 @@ void RfManager::resetMetrics(uint8_t channel)
     _metrics.packets = 0;
     _metrics.errors = 0;
     _metrics.startMs = millis();
-    _metrics.macStats.clear();
+    _metrics.macTable = {};
+    _metrics.macTableCount = 0;
 }
 
 void RfManager::emitMetrics()
@@ -256,75 +257,90 @@ void RfManager::updateMacMetrics(wifi_promiscuous_pkt_t* pkt, int8_t rssi, bool 
 
     MacAddress src = { payload[10], payload[11], payload[12], payload[13], payload[14], payload[15] };
 
-    if (_metrics.macStats.size() >= 32)
+    for (size_t i = 0; i < _metrics.macTableCount; ++i)
     {
-        // Evict the least-seen transmitter to cap memory use.
-        auto weakest = _metrics.macStats.begin();
-        for (auto it = _metrics.macStats.begin(); it != _metrics.macStats.end(); ++it)
+        if (_metrics.macTable[i].mac == src)
         {
-            if (it->second.packets < weakest->second.packets)
+            MacMetrics& m = _metrics.macTable[i];
+            m.packets++;
+            m.rssiSum += rssi;
+            if (rssi < m.rssiMin)
             {
-                weakest = it;
+                m.rssiMin = rssi;
             }
+            if (rssi > m.rssiMax)
+            {
+                m.rssiMax = rssi;
+            }
+            if (rxError)
+            {
+                m.errors++;
+            }
+            return;
         }
-        _metrics.macStats.erase(weakest);
     }
 
-    auto it = _metrics.macStats.find(src);
-    if (it == _metrics.macStats.end())
+    if (_metrics.macTableCount < MacTableSize)
     {
-        MacMetrics m = {};
+        MacMetrics& m = _metrics.macTable[_metrics.macTableCount++];
         m.mac = src;
         m.rssiMin = rssi;
         m.rssiMax = rssi;
         m.rssiSum = rssi;
         m.packets = 1;
         m.errors = rxError ? 1 : 0;
-        _metrics.macStats[src] = m;
     }
     else
     {
-        MacMetrics& m = it->second;
-        m.packets++;
-        m.rssiSum += rssi;
-        if (rssi < m.rssiMin)
+        // Evict the least-seen transmitter to keep the table fixed-size.
+        size_t victim = 0;
+        for (size_t i = 1; i < MacTableSize; ++i)
         {
-            m.rssiMin = rssi;
+            if (_metrics.macTable[i].packets < _metrics.macTable[victim].packets)
+            {
+                victim = i;
+            }
         }
-        if (rssi > m.rssiMax)
-        {
-            m.rssiMax = rssi;
-        }
-        if (rxError)
-        {
-            m.errors++;
-        }
+
+        MacMetrics& m = _metrics.macTable[victim];
+        m.mac = src;
+        m.rssiMin = rssi;
+        m.rssiMax = rssi;
+        m.rssiSum = rssi;
+        m.packets = 1;
+        m.errors = rxError ? 1 : 0;
     }
 }
 
 void RfManager::addTopMacs(JsonDocument& doc)
 {
-    JsonArray topMacs = doc["top_macs"].to<JsonArray>();
-
-    if (_metrics.macStats.empty())
+    if (_metrics.macTableCount == 0)
     {
         return;
     }
 
-    std::vector<MacMetrics> sorted;
-    sorted.reserve(_metrics.macStats.size());
-    for (const auto& kv : _metrics.macStats)
+    // Sort indices into the fixed table instead of copying or allocating.
+    std::array<size_t, MacTableSize> indices = {};
+    for (size_t i = 0; i < _metrics.macTableCount; ++i)
     {
-        sorted.push_back(kv.second);
+        indices[i] = i;
     }
 
-    std::sort(sorted.begin(), sorted.end(),
-              [](const MacMetrics& a, const MacMetrics& b) { return a.packets > b.packets; });
+    const auto& table = _metrics.macTable;
+    std::sort(indices.begin(), indices.begin() + _metrics.macTableCount,
+              [&table](size_t a, size_t b) {
+                  if (table[a].packets != table[b].packets)
+                  {
+                      return table[a].packets > table[b].packets;
+                  }
+                  return table[a].rssiSum > table[b].rssiSum;
+              });
 
-    size_t topCount = std::min(sorted.size(), static_cast<size_t>(3));
+    JsonArray topMacs = doc["top_macs"].to<JsonArray>();
+    size_t topCount = std::min(_metrics.macTableCount, static_cast<size_t>(3));
     for (size_t i = 0; i < topCount; ++i)
     {
-        const MacMetrics& m = sorted[i];
+        const MacMetrics& m = table[indices[i]];
         double rssiAvg = m.packets > 0
             ? static_cast<double>(m.rssiSum) / static_cast<double>(m.packets)
             : 0.0;

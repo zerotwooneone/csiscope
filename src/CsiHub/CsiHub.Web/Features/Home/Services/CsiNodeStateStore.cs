@@ -106,6 +106,7 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
     public Task StartDistributedSweepAsync(
         IReadOnlyCollection<string> macs,
         int dwellMs = 250,
+        bool resetAggregates = true,
         CancellationToken cancellationToken = default)
     {
         if (macs.Count == 0)
@@ -116,7 +117,12 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
         StopDistributedSweep();
 
         _sweepDwellMs = dwellMs;
-        _combinedRfScan.Clear();
+
+        if (resetAggregates)
+        {
+            _combinedRfScan.Clear();
+            LatestRecommendation = null;
+        }
         _sweepAssignments.Clear();
         _sweepAwaiting.Clear();
 

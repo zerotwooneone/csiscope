@@ -5,7 +5,6 @@
 #include <array>
 #include <cstdint>
 #include <esp_wifi.h>
-#include <map>
 
 /// <summary>
 /// Non-blocking RF survey manager for the ESP32-S3.
@@ -57,6 +56,8 @@ public:
 private:
     using MacAddress = std::array<uint8_t, 6>;
 
+    static constexpr size_t MacTableSize = 32;
+
     struct MacMetrics
     {
         MacAddress mac;
@@ -76,7 +77,8 @@ private:
         uint32_t packets;
         uint32_t errors;
         unsigned long startMs;
-        std::map<MacAddress, MacMetrics> macStats;
+        std::array<MacMetrics, MacTableSize> macTable = {};
+        size_t macTableCount = 0;
     };
 
     static bool _started;
