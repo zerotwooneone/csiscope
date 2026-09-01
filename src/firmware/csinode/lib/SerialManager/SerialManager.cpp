@@ -206,6 +206,25 @@ void SerialManager::parseAndDispatch(const char* line)
             return;
         }
 
+        const char* mode = doc["mode"] | "diag";
+
+        if (strcmp(mode, "passive") == 0)
+        {
+            int bw = doc["bw"] | 20;
+            const char* macFilter = doc["mac_filter"];
+            if (macFilter == nullptr || strlen(macFilter) == 0)
+            {
+                sendError("set_rf", "missing_mac_filter");
+                return;
+            }
+
+            RfManager::startPassive(static_cast<uint8_t>(ch), static_cast<uint8_t>(bw), macFilter);
+            currentState = SystemState::STATE_STREAMING;
+            HardwareDiagnostics::setLedState(currentState);
+            sendAck("set_rf", true);
+            return;
+        }
+
         currentState = SystemState::STATE_DIAG_RF;
         HardwareDiagnostics::setLedState(currentState);
 

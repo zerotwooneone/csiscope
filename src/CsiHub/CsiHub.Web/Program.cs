@@ -11,6 +11,7 @@ builder.Services.AddRazorComponents()
 builder.Services.AddCsiIngestion(builder.Configuration.GetSection("CsiIngestion"));
 
 builder.Services.AddSingleton<CsiNodeConfigurationService>();
+builder.Services.AddSingleton<RfChannelEvaluator>();
 builder.Services.AddSingleton<CsiNodeStateStore>();
 builder.Services.AddSingleton<IHostedService>(provider => provider.GetRequiredService<CsiNodeStateStore>());
 

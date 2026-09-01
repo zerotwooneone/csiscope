@@ -20,6 +20,7 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
     private readonly CsiIngestionChannel _channel;
     private readonly CsiNodePortManager _portManager;
     private readonly CsiNodeConfigurationService _configurationService;
+    private readonly RfChannelEvaluator _evaluator;
     private readonly ILogger<CsiNodeStateStore> _logger;
     private readonly ConcurrentDictionary<string, NodeStateViewModel> _nodes = new();
     private readonly ConcurrentDictionary<string, DateTimeOffset> _lastRestore = new();
@@ -40,11 +41,13 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
         CsiIngestionChannel channel,
         CsiNodePortManager portManager,
         CsiNodeConfigurationService configurationService,
+        RfChannelEvaluator evaluator,
         ILogger<CsiNodeStateStore> logger)
     {
         _channel = channel;
         _portManager = portManager;
         _configurationService = configurationService;
+        _evaluator = evaluator;
         _logger = logger;
     }
 
@@ -57,6 +60,11 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
     /// Combined 1-13 RF scan results aggregated from all participating nodes.
     /// </summary>
     public IReadOnlyDictionary<int, RfChannelAggregate> CombinedRfScan => _combinedRfScan;
+
+    /// <summary>
+    /// The current channel and target MAC recommendation.
+    /// </summary>
+    public RfRecommendation? LatestRecommendation { get; private set; }
 
     /// <summary>
     /// True while a distributed RF sweep is in progress.
@@ -567,9 +575,12 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
                 Packets = metrics.Packets,
                 Errors = metrics.Errors,
                 DurationMs = metrics.DurationMs,
-                SampleCount = 1
+                SampleCount = 1,
+                TopMacs = metrics.TopMacs?.ToDictionary(m => m.Mac ?? string.Empty, m => m, StringComparer.OrdinalIgnoreCase) ?? new(StringComparer.OrdinalIgnoreCase)
             },
             (_, existing) => Merge(existing, metrics));
+
+        LatestRecommendation = _evaluator.Recommend(_combinedRfScan);
     }
 
     private static RfChannelAggregate Merge(RfChannelAggregate existing, RfChannelMetrics metrics)
@@ -578,6 +589,9 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
         var rssiAvg = packets > 0
             ? ((existing.RssiAvg * existing.Packets) + (metrics.RssiAvg * metrics.Packets)) / packets
             : 0.0;
+
+        var topMacs = new Dictionary<string, RfMacMetrics>(existing.TopMacs, StringComparer.OrdinalIgnoreCase);
+        MergeMacs(topMacs, metrics.TopMacs);
 
         return new RfChannelAggregate
         {
@@ -588,8 +602,47 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
             Packets = packets,
             Errors = existing.Errors + metrics.Errors,
             DurationMs = Math.Max(existing.DurationMs, metrics.DurationMs),
-            SampleCount = existing.SampleCount + 1
+            SampleCount = existing.SampleCount + 1,
+            TopMacs = topMacs
         };
+    }
+
+    private static void MergeMacs(Dictionary<string, RfMacMetrics> destination, List<RfMacMetrics>? source)
+    {
+        if (source is null)
+        {
+            return;
+        }
+
+        foreach (var mac in source)
+        {
+            if (string.IsNullOrWhiteSpace(mac.Mac))
+            {
+                continue;
+            }
+
+            if (destination.TryGetValue(mac.Mac, out var existing))
+            {
+                var packets = existing.Packets + mac.Packets;
+                var rssiAvg = packets > 0
+                    ? ((existing.RssiAvg * existing.Packets) + (mac.RssiAvg * mac.Packets)) / packets
+                    : 0.0;
+
+                destination[mac.Mac] = new RfMacMetrics
+                {
+                    Mac = mac.Mac,
+                    Packets = packets,
+                    Errors = existing.Errors + mac.Errors,
+                    RssiMin = Math.Min(existing.RssiMin, mac.RssiMin),
+                    RssiMax = Math.Max(existing.RssiMax, mac.RssiMax),
+                    RssiAvg = rssiAvg
+                };
+            }
+            else
+            {
+                destination[mac.Mac] = mac;
+            }
+        }
     }
 
     private void AggregateAndAdvanceSweep(NodePayload payload)
@@ -641,6 +694,47 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
 
         var json = JsonSerializer.Serialize(new { cmd = "set_rf", ch = channel, dwell_ms = dwellMs });
         return _portManager.TrySendCommand(portName, json);
+    }
+
+    private bool TrySendSetRfPassive(string mac, int channel, int bw, string? targetMac)
+    {
+        if (!TryGetPortName(mac, out var portName) || string.IsNullOrWhiteSpace(portName))
+        {
+            return false;
+        }
+
+        var json = JsonSerializer.Serialize(new
+        {
+            cmd = "set_rf",
+            ch = channel,
+            bw,
+            mode = "passive",
+            mac_filter = targetMac
+        });
+
+        return _portManager.TrySendCommand(portName, json);
+    }
+
+    /// <summary>
+    /// Broadcasts a passive sniffing configuration to all connected nodes, attempting
+    /// to transition them into streaming mode simultaneously.
+    /// </summary>
+    public Task BroadcastLockAndStreamAsync(int channel, int bw, string? targetMac, CancellationToken cancellationToken = default)
+    {
+        var macs = GetConnectedMacs();
+        if (macs.Count == 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        var tasks = new List<Task>(macs.Count);
+        foreach (var mac in macs)
+        {
+            var captured = mac;
+            tasks.Add(Task.Run(() => TrySendSetRfPassive(captured, channel, bw, targetMac), cancellationToken));
+        }
+
+        return Task.WhenAll(tasks);
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)

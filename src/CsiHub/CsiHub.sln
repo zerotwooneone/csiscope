@@ -12,6 +12,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CsiHub.Ingestion.Tests", "C
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CsiHub.Ingestion.IntegrationTests", "CsiHub.Ingestion.IntegrationTests\CsiHub.Ingestion.IntegrationTests.csproj", "{0B367293-2FDE-4B59-8593-972B2E4F020C}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CsiHub.Web.Tests", "CsiHub.Web.Tests\CsiHub.Web.Tests.csproj", "{8D5AC7B4-032A-4DEB-82D6-2AE68F99252D}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -94,6 +96,18 @@ Global
 		{0B367293-2FDE-4B59-8593-972B2E4F020C}.Release|x64.Build.0 = Release|Any CPU
 		{0B367293-2FDE-4B59-8593-972B2E4F020C}.Release|x86.ActiveCfg = Release|Any CPU
 		{0B367293-2FDE-4B59-8593-972B2E4F020C}.Release|x86.Build.0 = Release|Any CPU
+		{8D5AC7B4-032A-4DEB-82D6-2AE68F99252D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8D5AC7B4-032A-4DEB-82D6-2AE68F99252D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8D5AC7B4-032A-4DEB-82D6-2AE68F99252D}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{8D5AC7B4-032A-4DEB-82D6-2AE68F99252D}.Debug|x64.Build.0 = Debug|Any CPU
+		{8D5AC7B4-032A-4DEB-82D6-2AE68F99252D}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{8D5AC7B4-032A-4DEB-82D6-2AE68F99252D}.Debug|x86.Build.0 = Debug|Any CPU
+		{8D5AC7B4-032A-4DEB-82D6-2AE68F99252D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8D5AC7B4-032A-4DEB-82D6-2AE68F99252D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{8D5AC7B4-032A-4DEB-82D6-2AE68F99252D}.Release|x64.ActiveCfg = Release|Any CPU
+		{8D5AC7B4-032A-4DEB-82D6-2AE68F99252D}.Release|x64.Build.0 = Release|Any CPU
+		{8D5AC7B4-032A-4DEB-82D6-2AE68F99252D}.Release|x86.ActiveCfg = Release|Any CPU
+		{8D5AC7B4-032A-4DEB-82D6-2AE68F99252D}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

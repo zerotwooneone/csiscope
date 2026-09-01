@@ -188,6 +188,18 @@
                     <button type="button" class="btn-close" aria-label="Close" @onclick="CloseAggregateModal"></button>
                 </div>
                 <div class="modal-body">
+                    @if (Store.LatestRecommendation is not null)
+                    {
+                        <div class="alert alert-info">
+                            <strong>Recommendation:</strong> @Store.LatestRecommendation.Reason<br />
+                            <small>Score: @Store.LatestRecommendation.Score.ToString("F2")</small>
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="alert alert-secondary">Run a distributed RF sweep to generate a channel / MAC recommendation.</div>
+                    }
+
                     @if (Store.CombinedRfScan.Count > 0)
                     {
                         <h6 class="mb-3">Combined Channel Congestion</h6>
@@ -207,6 +219,41 @@
                     {
                         <p class="text-muted">No aggregate RF scan data available. Run a distributed RF sweep to collect a complete 1-13 channel map.</p>
                     }
+
+                    <hr />
+
+                    <h6 class="mb-3">Lock & Stream</h6>
+                    <div class="row g-3 align-items-end">
+                        <div class="col-md-3">
+                            <label class="form-label">Channel</label>
+                            <select class="form-select" @bind="LockChannel">
+                                @for (int ch = 1; ch <= 13; ch++)
+                                {
+                                    <option value="@ch">@ch</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Target MAC</label>
+                            <select class="form-select" @bind="_lockMac">
+                                <option value="">-- select MAC --</option>
+                                @if (Store.CombinedRfScan.TryGetValue(_lockChannel, out var selectedChannel) && selectedChannel is not null)
+                                {
+                                    @foreach (var mac in selectedChannel.TopMacs.Values.OrderByDescending(m => m.Packets).ThenByDescending(m => m.RssiAvg))
+                                    {
+                                        <option value="@mac.Mac">@mac.Mac (@mac.Packets pkts, @mac.RssiAvg.ToString("F1") dBm)</option>
+                                    }
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label">BW (MHz)</label>
+                            <input type="number" class="form-control" @bind="_lockBw" min="20" max="40" step="20" />
+                        </div>
+                        <div class="col-md-3">
+                            <button class="btn btn-success w-100" type="button" @onclick="LockAndStream">Lock & Stream</button>
+                        </div>
+                    </div>
                 </div>
                 <div class="modal-footer">
                     <button class="btn btn-secondary" type="button" @onclick="CloseAggregateModal">Close</button>
@@ -222,8 +269,24 @@
     private NodeStateViewModel? _selectedNode;
     private bool _showAggregate;
     private int _manualChannel = 6;
+    private int _lockChannel = 6;
+    private string? _lockMac;
+    private int _lockBw = 20;
     private readonly ConcurrentDictionary<string, byte> _cooldownKeys = new();
     private readonly ConcurrentDictionary<string, NodeConfiguration> _localConfigurations = new();
+
+    private int LockChannel
+    {
+        get => _lockChannel;
+        set
+        {
+            if (_lockChannel != value)
+            {
+                _lockChannel = value;
+                UpdateLockMac();
+            }
+        }
+    }
 
     private async Task UpdateLoop()
     {
@@ -423,6 +486,61 @@
     private void ShowAggregateModal()
     {
         _showAggregate = true;
+        _lockBw = 20;
+
+        if (Store.LatestRecommendation is not null)
+        {
+            _lockChannel = Store.LatestRecommendation.Channel;
+            _lockBw = 20;
+            UpdateLockMac();
+            _lockMac = Store.LatestRecommendation.Mac ?? _lockMac;
+        }
+        else
+        {
+            _lockChannel = 6;
+            _lockMac = null;
+        }
+    }
+
+    private void UpdateLockMac()
+    {
+        if (Store.CombinedRfScan.TryGetValue(_lockChannel, out var selectedChannel) && selectedChannel.TopMacs.Count > 0)
+        {
+            _lockMac = selectedChannel.TopMacs.Values
+                .OrderByDescending(m => m.Packets)
+                .ThenByDescending(m => m.RssiAvg)
+                .FirstOrDefault()?.Mac;
+        }
+        else
+        {
+            _lockMac = null;
+        }
+    }
+
+    private async Task LockAndStream()
+    {
+        if (_lockChannel < 1 || _lockChannel > 13)
+        {
+            _errorMessage = "Invalid channel.";
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(_lockMac))
+        {
+            _errorMessage = "Select a target MAC.";
+            return;
+        }
+
+        try
+        {
+            await Store.BroadcastLockAndStreamAsync(_lockChannel, _lockBw, _lockMac).ConfigureAwait(false);
+            _showAggregate = false;
+            _errorMessage = null;
+        }
+        catch (Exception ex)
+        {
+            _errorMessage = $"Lock & Stream failed: {ex.Message}";
+        }
     }
 
     private void CloseAggregateModal()

@@ -127,7 +127,7 @@ public class NodePayloadJsonConverterTests
     [Fact]
     public void Can_Parse_Rf_Scan_Payload()
     {
-        const string json = """{"type":"rf_scan","mac":"AA:BB:CC:DD:EE:FF","ch":6,"rssi_min":-80,"rssi_max":-40,"rssi_avg":-62.5,"packets":42,"errors":3,"duration_ms":500,"timestamp":12345}""";
+        const string json = """{"type":"rf_scan","mac":"AA:BB:CC:DD:EE:FF","ch":6,"rssi_min":-80,"rssi_max":-40,"rssi_avg":-62.5,"packets":42,"errors":3,"duration_ms":500,"timestamp":12345,"top_macs":[{"mac":"11:22:33:44:55:66","packets":30,"errors":1,"rssi_min":-70,"rssi_max":-50,"rssi_avg":-60.0},{"mac":"AA:BB:CC:DD:EE:FF","packets":12,"errors":2,"rssi_min":-80,"rssi_max":-60,"rssi_avg":-72.5}]}""";
 
         var payload = JsonSerializer.Deserialize<NodePayload>(json);
 
@@ -144,6 +144,12 @@ public class NodePayloadJsonConverterTests
         Assert.Equal(42L, payload.Rf.Packets);
         Assert.Equal(3L, payload.Rf.Errors);
         Assert.Equal(500, payload.Rf.DurationMs);
+
+        Assert.NotNull(payload.Rf.TopMacs);
+        Assert.Equal(2, payload.Rf.TopMacs.Count);
+        Assert.Equal("11:22:33:44:55:66", payload.Rf.TopMacs[0].Mac);
+        Assert.Equal(30L, payload.Rf.TopMacs[0].Packets);
+        Assert.Equal(-60.0, payload.Rf.TopMacs[0].RssiAvg);
     }
 
     [Fact]

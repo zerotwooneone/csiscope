@@ -1,3 +1,5 @@
+using CsiHub.Ingestion.Models;
+
 namespace CsiHub.Features.Home.Models;
 
 /// <summary>
@@ -41,4 +43,9 @@ public sealed class RfChannelAggregate
     /// Number of nodes that contributed to this aggregate.
     /// </summary>
     public int SampleCount { get; set; }
+
+    /// <summary>
+    /// Merged top transmitter MACs across all contributing nodes for this channel.
+    /// </summary>
+    public Dictionary<string, RfMacMetrics> TopMacs { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }

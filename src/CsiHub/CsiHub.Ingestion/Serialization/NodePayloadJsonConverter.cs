@@ -158,6 +158,10 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
                     }
                     break;
 
+                case "top_macs":
+                    EnsureRf(payload).TopMacs = ReadTopMacs(ref reader);
+                    break;
+
                 default:
                     reader.Skip();
                     break;
@@ -170,6 +174,93 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
     private static RfChannelMetrics EnsureRf(NodePayload payload)
     {
         return payload.Rf ??= new RfChannelMetrics();
+    }
+
+    private static List<RfMacMetrics>? ReadTopMacs(ref Utf8JsonReader reader)
+    {
+        if (reader.TokenType != JsonTokenType.StartArray)
+        {
+            return null;
+        }
+
+        var topMacs = new List<RfMacMetrics>();
+
+        while (reader.Read())
+        {
+            if (reader.TokenType == JsonTokenType.EndArray)
+            {
+                break;
+            }
+
+            if (reader.TokenType == JsonTokenType.StartObject)
+            {
+                var mac = new RfMacMetrics();
+                while (reader.Read())
+                {
+                    if (reader.TokenType == JsonTokenType.EndObject)
+                    {
+                        break;
+                    }
+
+                    if (reader.TokenType != JsonTokenType.PropertyName)
+                    {
+                        reader.Skip();
+                        continue;
+                    }
+
+                    string prop = reader.GetString() ?? string.Empty;
+                    reader.Read();
+
+                    switch (prop)
+                    {
+                        case "mac":
+                            mac.Mac = reader.GetString();
+                            break;
+                        case "packets":
+                            if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt64(out var packets))
+                            {
+                                mac.Packets = packets;
+                            }
+                            break;
+                        case "errors":
+                            if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt64(out var errors))
+                            {
+                                mac.Errors = errors;
+                            }
+                            break;
+                        case "rssi_min":
+                            if (reader.TokenType == JsonTokenType.Number && reader.TryGetDouble(out var rssiMin))
+                            {
+                                mac.RssiMin = rssiMin;
+                            }
+                            break;
+                        case "rssi_max":
+                            if (reader.TokenType == JsonTokenType.Number && reader.TryGetDouble(out var rssiMax))
+                            {
+                                mac.RssiMax = rssiMax;
+                            }
+                            break;
+                        case "rssi_avg":
+                            if (reader.TokenType == JsonTokenType.Number && reader.TryGetDouble(out var rssiAvg))
+                            {
+                                mac.RssiAvg = rssiAvg;
+                            }
+                            break;
+                        default:
+                            reader.Skip();
+                            break;
+                    }
+                }
+
+                topMacs.Add(mac);
+            }
+            else
+            {
+                reader.Skip();
+            }
+        }
+
+        return topMacs;
     }
 
     private static double[]? ReadDoubleArray(ref Utf8JsonReader reader)

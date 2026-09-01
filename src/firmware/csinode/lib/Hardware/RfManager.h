@@ -1,8 +1,11 @@
 #pragma once
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
+#include <array>
 #include <cstdint>
 #include <esp_wifi.h>
+#include <map>
 
 /// <summary>
 /// Non-blocking RF survey manager for the ESP32-S3.
@@ -42,11 +45,28 @@ public:
     static void setChannel(uint8_t channel);
 
     /// <summary>
+    /// Starts passive sniffing on a channel with a target MAC filter.
+    /// </summary>
+    static void startPassive(uint8_t channel, uint8_t bw, const char* macFilter);
+
+    /// <summary>
     /// True while the channel sweep is still in progress.
     /// </summary>
     static bool isSweeping() { return _sweepActive; }
 
 private:
+    using MacAddress = std::array<uint8_t, 6>;
+
+    struct MacMetrics
+    {
+        MacAddress mac;
+        uint32_t packets;
+        uint32_t errors;
+        int8_t rssiMin;
+        int8_t rssiMax;
+        int32_t rssiSum;
+    };
+
     struct ChannelMetrics
     {
         uint8_t channel;
@@ -56,12 +76,17 @@ private:
         uint32_t packets;
         uint32_t errors;
         unsigned long startMs;
+        std::map<MacAddress, MacMetrics> macStats;
     };
 
     static bool _started;
     static bool _sweepActive;
     static bool _singleChannelActive;
+    static bool _passiveActive;
     static uint8_t _singleChannel;
+    static uint8_t _passiveChannel;
+    static uint8_t _passiveBw;
+    static String _passiveMacFilter;
     static uint16_t _dwellMs;
     static uint8_t _channelIndex;
     static ChannelMetrics _metrics;
@@ -73,4 +98,7 @@ private:
     static void resetMetrics(uint8_t channel);
     static void emitMetrics();
     static void promiscuousCallback(void* buf, wifi_promiscuous_pkt_type_t type);
+    static void updateMacMetrics(wifi_promiscuous_pkt_t* pkt, int8_t rssi, bool rxError);
+    static void addTopMacs(JsonDocument& doc);
+    static String formatMac(const MacAddress& mac);
 };

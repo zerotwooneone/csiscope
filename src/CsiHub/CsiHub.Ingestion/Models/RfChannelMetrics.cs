@@ -39,4 +39,9 @@ public sealed class RfChannelMetrics
     /// Length of the dwell window, in milliseconds.
     /// </summary>
     public int DurationMs { get; set; }
+
+    /// <summary>
+    /// The most active transmitter MACs observed during the dwell window.
+    /// </summary>
+    public List<RfMacMetrics>? TopMacs { get; set; }
 }
