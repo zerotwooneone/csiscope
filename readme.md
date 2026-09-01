@@ -29,4 +29,4 @@ To accommodate the physics of RF sensing, the system is divided into two distinc
 *   **Antennas:** 3x 2.4GHz / 5GHz Dual-Band Omni-Directional Antennas mounted at precise 6.25 cm intervals ($\lambda/2$ for 2.4 GHz)[cite: 1, 2].
 *   **IMU:** 1x BNO085 9-axis IMU (wired exclusively to the Leader node)[cite: 1, 2].
 *   **Connectivity:** 4-Port USB 3.0 Hub for serial data aggregation[cite: 1].
-*   **Sync Wiring:** A hardwired Trigger signal (GPIO4 output to GPIO5 inputs) and Common Ground line between nodes to bypass unpredictable Wi-Fi scheduling latencies[cite: 1, 2].
+*   **Sync Wiring:** A hardwired Trigger signal (GPIO output to GPIO inputs) and Common Ground line between nodes to bypass unpredictable Wi-Fi scheduling latencies[cite: 1, 2].

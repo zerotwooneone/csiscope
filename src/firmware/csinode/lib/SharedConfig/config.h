@@ -8,7 +8,7 @@ namespace Config
     constexpr uint8_t PIN_I2C_SCL = 9;
     constexpr uint8_t PIN_WS2812 = 48;  // Default RGB LED on ESP32-S3 DevKit
     constexpr uint8_t PIN_SYNC_OUT = 4; // GPIO4 pulse generation
-    constexpr uint8_t PIN_SYNC_IN = 5;  // GPIO5 interrupt listening
+    constexpr uint8_t PIN_SYNC_IN = 7;  // GPIO7 interrupt listening
 
     // Serial & Timings
     constexpr uint32_t SERIAL_BAUD = 921600;
