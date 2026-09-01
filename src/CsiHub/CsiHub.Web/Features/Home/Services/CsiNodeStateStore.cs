@@ -641,7 +641,8 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
                     Errors = existing.Errors + mac.Errors,
                     RssiMin = Math.Min(existing.RssiMin, mac.RssiMin),
                     RssiMax = Math.Max(existing.RssiMax, mac.RssiMax),
-                    RssiAvg = rssiAvg
+                    RssiAvg = rssiAvg,
+                    DurationMs = existing.DurationMs + mac.DurationMs
                 };
             }
             else

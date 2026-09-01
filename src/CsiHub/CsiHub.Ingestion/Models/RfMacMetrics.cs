@@ -34,4 +34,9 @@ public sealed class RfMacMetrics
     /// Average RSSI from this transmitter, in dBm.
     /// </summary>
     public double RssiAvg { get; set; }
+
+    /// <summary>
+    /// Total time, in milliseconds, over which this transmitter's packets were observed.
+    /// </summary>
+    public int DurationMs { get; set; }
 }

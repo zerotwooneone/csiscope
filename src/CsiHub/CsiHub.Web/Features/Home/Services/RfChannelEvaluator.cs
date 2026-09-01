@@ -11,8 +11,15 @@ namespace CsiHub.Features.Home.Services;
 public sealed class RfChannelEvaluator
 {
     /// <summary>
+    /// Minimum packets per second a single transmitter must sustain to avoid a
+    /// heavy score penalty. Below this, the downstream DSP pipeline will starve.
+    /// </summary>
+    public const double MinimumPps = 50.0;
+
+    /// <summary>
     /// Recommends the best channel and target MAC from an aggregated 1-13 scan.
-    /// Prefers channels with low total traffic and a dominant, strong transmitter.
+    /// Prefers the most congested channel carrying a single strong, stable
+    /// transmitter that can sustain at least <see cref="MinimumPps"/> packets/s.
     /// </summary>
     public RfRecommendation? Recommend(IReadOnlyDictionary<int, RfChannelAggregate> combined)
     {
@@ -40,29 +47,35 @@ public sealed class RfChannelEvaluator
         }
 
         var bestMac = bestChannel.TopMacs.Values
-            .OrderByDescending(m => m.Packets)
-            .ThenByDescending(m => m.RssiAvg)
+            .Select(m => new { Metrics = m, Stats = EvaluateMac(m) })
+            .OrderByDescending(x => x.Stats.Score)
             .FirstOrDefault();
 
         var recommendation = new RfRecommendation
         {
             Channel = bestChannel.Channel,
-            Mac = bestMac?.Mac,
+            Mac = bestMac?.Metrics.Mac,
             Score = bestChannelScore,
             Aggregate = bestChannel,
             TopMacs = bestChannel.TopMacs.Values
-                .OrderByDescending(m => m.Packets)
-                .ThenByDescending(m => m.RssiAvg)
+                .Select(m => new { Metrics = m, Stats = EvaluateMac(m) })
+                .OrderByDescending(x => x.Stats.Score)
+                .Select(x => x.Metrics)
                 .ToList()
         };
 
         if (bestMac is null)
         {
-            recommendation.Reason = $"Channel {recommendation.Channel} has the lowest congestion but no dominant transmitter was observed.";
+            recommendation.Reason = $"Channel {recommendation.Channel} has no dominant transmitter for stable telemetry.";
         }
         else
         {
-            recommendation.Reason = $"Channel {recommendation.Channel} has the lowest congestion and {bestMac.Mac} is the dominant transmitter ({bestMac.Packets} packets, {bestMac.RssiAvg:F1} dBm average).";
+            var stats = bestMac.Stats;
+            var gateStatus = stats.Pps >= MinimumPps
+                ? "meets"
+                : "falls below";
+
+            recommendation.Reason = $"Channel {recommendation.Channel} has the highest stable telemetry. {bestMac.Metrics.Mac} is the dominant transmitter ({stats.Pps:F0} pps, {bestMac.Metrics.RssiAvg:F1} dBm, {stats.Stability:F0}% stability) and {gateStatus} the {MinimumPps:F0} pps threshold.";
         }
 
         return recommendation;
@@ -87,22 +100,76 @@ public sealed class RfChannelEvaluator
     }
 
     /// <summary>
-    /// Higher is better. Heavily penalizes traffic and errors, slightly rewards
-    /// stronger (less negative) average RSSI.
+    /// Higher is better. Rewards a single dominant transmitter with high PPS and
+    /// a strong, stable RSSI. Channels without a transmitter meeting the
+    /// <see cref="MinimumPps"/> threshold are heavily penalized.
     /// </summary>
     private static double ScoreChannel(RfChannelAggregate channel)
     {
-        double congestion = channel.Packets + channel.Errors * 10.0;
-        double trafficFactor = 1.0 / (1.0 + congestion / 100.0);
-
-        // RSSI is negative; add 100 to make it a positive 0-100-ish factor.
-        double rssiFactor = (channel.RssiAvg + 100.0) / 100.0;
-        if (rssiFactor <= 0.0)
+        if (channel.TopMacs.Count == 0)
         {
-            rssiFactor = 0.01;
+            return 0.0;
         }
 
-        return trafficFactor * rssiFactor;
+        double bestMacScore = 0.0;
+        double bestPps = 0.0;
+
+        foreach (var mac in channel.TopMacs.Values)
+        {
+            var stats = EvaluateMac(mac);
+            if (stats.Score > bestMacScore)
+            {
+                bestMacScore = stats.Score;
+                bestPps = stats.Pps;
+            }
+        }
+
+        // Threshold gating: a single transmitter must sustain at least 50 pps
+        // to keep the DSP pipeline fed.
+        if (bestPps < MinimumPps)
+        {
+            bestMacScore *= 0.1;
+        }
+
+        // Small congestion bonus: prefer busier channels overall, but only
+        // after the dominant-transmitter criteria are met.
+        double congestionBonus = Math.Sqrt(channel.Packets) / 100.0;
+
+        return bestMacScore + congestionBonus;
+    }
+
+    /// <summary>
+    /// Evaluates a single transmitter. Returns PPS, a stability percentage,
+    /// and an overall score where higher is better.
+    /// </summary>
+    private static (double Pps, double Stability, double Score) EvaluateMac(RfMacMetrics mac)
+    {
+        double seconds = Math.Max(1, mac.DurationMs) / 1000.0;
+        double pps = mac.Packets / seconds;
+
+        // Stronger (less negative) RSSI is better. Map -100..0 dBm to 0..1.
+        double rssiStrength = (mac.RssiAvg + 100.0) / 100.0;
+        if (rssiStrength <= 0.0)
+        {
+            rssiStrength = 0.01;
+        }
+        if (rssiStrength > 1.0)
+        {
+            rssiStrength = 1.0;
+        }
+
+        // Stable signal has a small min-to-max spread. 0 dB spread = 100%,
+        // 30 dB spread = ~25%.
+        double spread = mac.RssiMax - mac.RssiMin;
+        if (spread < 0.0)
+        {
+            spread = 0.0;
+        }
+        double stability = 100.0 / (1.0 + spread / 10.0);
+
+        double score = pps * rssiStrength * (stability / 100.0);
+
+        return (pps, stability, score);
     }
 }
 

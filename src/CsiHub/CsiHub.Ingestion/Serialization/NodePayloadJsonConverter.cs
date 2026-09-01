@@ -168,6 +168,17 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
             }
         }
 
+        if (payload.Rf is not null && payload.Rf.DurationMs > 0 && payload.Rf.TopMacs is not null)
+        {
+            foreach (var mac in payload.Rf.TopMacs)
+            {
+                if (mac is not null)
+                {
+                    mac.DurationMs = payload.Rf.DurationMs;
+                }
+            }
+        }
+
         return payload;
     }
 
