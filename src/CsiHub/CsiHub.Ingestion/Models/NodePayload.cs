@@ -37,6 +37,16 @@ public sealed class NodePayload
 
     public double[]? Csi { get; set; }
 
+    /// <summary>
+    /// Monotonic sequence number of the CSI payload (per node).
+    /// </summary>
+    public int? Seq { get; set; }
+
+    /// <summary>
+    /// RSSI of the captured CSI frame in dBm.
+    /// </summary>
+    public int? Rssi { get; set; }
+
     public double[]? Imu { get; set; }
 
     /// <summary>

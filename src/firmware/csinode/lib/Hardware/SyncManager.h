@@ -32,12 +32,29 @@ public:
     /// </summary>
     static bool isLeader() { return _isLeader; }
 
+    /// <summary>
+    /// Returns a microsecond timestamp anchored to the first sync pulse.
+    /// Safe to call from any context; updates are protected by noInterrupts().
+    /// </summary>
+    static uint32_t syncedMicros();
+
+    /// <summary>
+    /// Returns the micros() value captured at the most recent sync pulse.
+    /// </summary>
+    static uint32_t lastSyncMicros();
+
 private:
     static bool _isLeader;
     static volatile bool _pulse;
     static bool _isrAttached;
+    static bool _outputIsrAttached;
+    static volatile uint32_t _lastSyncMicros;
+    static volatile uint32_t _syncedMicros;
 
+    // Follower input-edge ISR and leader output-edge ISR both feed syncTick().
     static void IRAM_ATTR onSyncIsr();
+    static void IRAM_ATTR onSyncOutputIsr();
+    static void IRAM_ATTR syncTick();
 
     static bool startLeader();
     static bool startFollower();

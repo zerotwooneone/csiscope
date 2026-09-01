@@ -104,6 +104,21 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
                     payload.Csi = ReadDoubleArray(ref reader);
                     break;
 
+                case "s":
+                case "seq":
+                    if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt32(out var seq))
+                    {
+                        payload.Seq = seq;
+                    }
+                    break;
+
+                case "rssi":
+                    if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt32(out var rssi))
+                    {
+                        payload.Rssi = rssi;
+                    }
+                    break;
+
                 case "i":
                 case "imu":
                     payload.Imu = ReadDoubleArray(ref reader);
@@ -386,6 +401,16 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
         {
             writer.WritePropertyName("csi");
             JsonSerializer.Serialize(writer, value.Csi, options);
+        }
+
+        if (value.Seq.HasValue)
+        {
+            writer.WriteNumber("seq", value.Seq.Value);
+        }
+
+        if (value.Rssi.HasValue)
+        {
+            writer.WriteNumber("rssi", value.Rssi.Value);
         }
 
         if (value.Imu is not null)

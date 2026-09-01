@@ -16,6 +16,11 @@ unsigned long lastHeartbeatMs = 0;
 
 void setup()
 {
+  // Increase the USB-CDC TX ring buffer so large CSI payloads fit without
+  // partial writes, and force non-blocking writes (no delay() in the CSI ISR).
+  Serial.setTxBufferSize(8192);
+  Serial.setTxTimeoutMs(0);
+
   // Opens its USB-CDC serial port[cite: 1]
   Serial.begin(Config::SERIAL_BAUD);
 

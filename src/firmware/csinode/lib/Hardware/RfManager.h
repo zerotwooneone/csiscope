@@ -6,6 +6,9 @@
 #include <cstdint>
 #include <esp_wifi.h>
 
+// Forward declaration of the CSI receive callback, which must use C linkage.
+extern "C" void csiRxCallback(void* ctx, wifi_csi_info_t* info);
+
 /// <summary>
 /// Non-blocking RF survey manager for the ESP32-S3.
 /// Drives promiscuous-mode channel sweeps and aggregates per-dwell metrics
@@ -89,8 +92,11 @@ private:
     static uint8_t _passiveChannel;
     static uint8_t _passiveBw;
     static String _passiveMacFilter;
+    static MacAddress _passiveTargetMac;
+    static bool _passiveTargetMacSet;
     static uint16_t _dwellMs;
     static uint8_t _channelIndex;
+    static uint32_t _csiSeq;
     static ChannelMetrics _metrics;
 
     static const uint8_t _channels[];
@@ -103,4 +109,12 @@ private:
     static void updateMacMetrics(wifi_promiscuous_pkt_t* pkt, int8_t rssi, bool rxError);
     static void addTopMacs(JsonDocument& doc);
     static String formatMac(const MacAddress& mac);
+
+    static bool parsePassiveTargetMac();
+    static bool matchesTargetMac(const uint8_t* mac);
+    static void handleCsi(wifi_csi_info_t* info);
+    static void emitCsi(wifi_csi_info_t* info, const int8_t* csiBuf, uint16_t csiLen);
+    static void prewarmCsiDoc();
+
+    friend void csiRxCallback(void* ctx, wifi_csi_info_t* info);
 };
