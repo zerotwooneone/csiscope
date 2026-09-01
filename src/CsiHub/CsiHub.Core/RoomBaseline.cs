@@ -12,8 +12,10 @@ namespace CsiHub.Core;
 public sealed class RoomBaseline
 {
     public const int DefaultWindowSize = 64;
+    public const double DefaultSampleRateHz = 50.0;
 
     private readonly double _emaAlpha;
+    private readonly double _sampleRateHz;
 
     private long[] _counts = Array.Empty<long>();
     private double[] _welfordMean = Array.Empty<double>();
@@ -30,14 +32,20 @@ public sealed class RoomBaseline
     private long _totalFrames;
     private bool _isInitialized;
 
-    public RoomBaseline(double emaAlpha = 0.2)
+    public RoomBaseline(double emaAlpha = 0.2, double sampleRateHz = DefaultSampleRateHz)
     {
         if (emaAlpha is <= 0.0 or >= 1.0)
         {
             throw new ArgumentOutOfRangeException(nameof(emaAlpha), "EMA alpha must be in (0, 1).");
         }
 
+        if (sampleRateHz <= 0.0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(sampleRateHz), "Sample rate must be positive.");
+        }
+
         _emaAlpha = emaAlpha;
+        _sampleRateHz = sampleRateHz;
     }
 
     /// <summary>
@@ -133,8 +141,10 @@ public sealed class RoomBaseline
     /// <summary>
     /// Updates the rolling-window Welford and EMA statistics with a new interleaved I/Q CSI frame.
     /// This method does not allocate: it only touches pre-allocated arrays and uses Span slicing.
+    /// When <paramref name="dt"/> is supplied, the EMA smoothing is scaled by the elapsed time so
+    /// that bursty, non-uniform telemetry is weighted correctly.
     /// </summary>
-    public void Update(double[] csi)
+    public void Update(double[] csi, TimeSpan? dt = null)
     {
         if (csi is null)
         {
@@ -193,6 +203,11 @@ public sealed class RoomBaseline
         _head = (_head + 1) % _windowSize;
         _totalFrames++;
 
+        // Compute per-frame EMA alpha once; when dt is known, scale it by the
+        // elapsed time relative to the nominal sample interval.
+        double alpha = ComputeEmaAlpha(dt);
+        double oneMinusAlpha = 1.0 - alpha;
+
         // Add the new frame to the running Welford and EMA statistics.
         for (int i = 0; i < _slotCount; i++)
         {
@@ -207,8 +222,22 @@ public sealed class RoomBaseline
             _welfordM2[i] += delta * (x - newMean);
             _variance[i] = _welfordM2[i] / n;
 
-            _ema[i] = n == 1 ? x : (_emaAlpha * x) + ((1.0 - _emaAlpha) * _ema[i]);
+            _ema[i] = n == 1 ? x : (alpha * x) + (oneMinusAlpha * _ema[i]);
         }
+    }
+
+    private double ComputeEmaAlpha(TimeSpan? dt)
+    {
+        if (!dt.HasValue || dt.Value <= TimeSpan.Zero)
+        {
+            return _emaAlpha;
+        }
+
+        // Convert the fixed per-sample alpha to a time-constant so that
+        // EMA smoothing scales with the actual inter-arrival interval.
+        // alpha(dt) = 1 - (1 - alpha)^(dt * sampleRate)
+        double intervals = dt.Value.TotalSeconds * _sampleRateHz;
+        return 1.0 - Math.Pow(1.0 - _emaAlpha, intervals);
     }
 
     /// <summary>

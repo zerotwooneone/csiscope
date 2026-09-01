@@ -17,6 +17,7 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
     private readonly CsiIngestionChannel _channel;
     private readonly ILogger<CsiDspBackgroundService> _logger;
     private readonly ConcurrentDictionary<string, RoomBaseline> _baselines = new();
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _lastUpdateAt = new();
 
     private CancellationTokenSource? _cts;
     private Task? _task;
@@ -108,7 +109,14 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
                         csiBaseline.Initialize(payload.Bandwidth.Value, RoomBaseline.DefaultWindowSize);
                     }
 
-                    csiBaseline.Update(payload.Csi);
+                    TimeSpan? dt = null;
+                    if (_lastUpdateAt.TryGetValue(payload.Mac!, out var last))
+                    {
+                        dt = payload.ReceivedAt - last;
+                    }
+
+                    csiBaseline.Update(payload.Csi, dt);
+                    _lastUpdateAt[payload.Mac!] = payload.ReceivedAt;
                 }
             }
         }

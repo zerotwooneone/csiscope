@@ -94,6 +94,28 @@ public class RoomBaselineTests
         }
     }
 
+    [Theory]
+    [InlineData(20.0, 8.0)]   // 50 Hz nominal, one sample interval -> alpha 0.2
+    [InlineData(100.0, 3.2768)] // 5 sample intervals -> 1 - 0.8^5
+    public void Ema_Respects_Variable_Time_Delta(double dtMs, double expectedEma0)
+    {
+        var baseline = new RoomBaseline(emaAlpha: 0.2, sampleRateHz: 50.0);
+        baseline.InitializeFromLength(2, 32);
+
+        var constant = new double[2] { 10.0, -10.0 };
+        var step = new double[2] { 0.0, 0.0 };
+
+        for (int i = 0; i < 100; i++)
+        {
+            baseline.Update(constant, TimeSpan.FromMilliseconds(20));
+        }
+
+        baseline.Update(step, TimeSpan.FromMilliseconds(dtMs));
+
+        Assert.Equal(expectedEma0, baseline.Ema[0], precision: 8);
+        Assert.Equal(-expectedEma0, baseline.Ema[1], precision: 8);
+    }
+
     [Fact]
     public void Initialize_Changes_Bandwidth_And_Resizes_Buffers()
     {
