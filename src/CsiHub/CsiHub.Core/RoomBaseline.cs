@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Diagnostics;
 
 namespace CsiHub.Core;
@@ -13,6 +14,18 @@ public sealed class RoomBaseline
 {
     public const int DefaultWindowSize = 64;
     public const double DefaultSampleRateHz = 50.0;
+
+    /// <summary>
+    /// Scale factor that maps raw 8-bit signed I/Q samples to the [-1.0, 1.0] range.
+    /// </summary>
+    public const double CsiInputScale = 1.0 / 128.0;
+
+    /// <summary>
+    /// Convergence threshold for the 95th-percentile slot variance when inputs are scaled by
+    /// <see cref="CsiInputScale"/>. A value of 0.01 corresponds to a raw variance of ~163,
+    /// which is low compared to the full-scale raw variance of ~4000.
+    /// </summary>
+    public const double ConvergenceVarianceThreshold = 0.01;
 
     private readonly double _emaAlpha;
     private readonly double _sampleRateHz;
@@ -90,8 +103,10 @@ public sealed class RoomBaseline
 
     /// <summary>
     /// True once the rolling window has filled and the per-slot variance has stabilized.
+    /// Uses the 95th-percentile slot variance so the noisiest 5% of subcarriers (guard/null
+    /// carriers) do not prevent convergence.
     /// </summary>
-    public bool IsConverged => _totalFrames >= _windowSize && MaxSlotVariance < 0.5;
+    public bool IsConverged => _totalFrames >= _windowSize && ComputePercentileVariance(0.95) < ConvergenceVarianceThreshold;
 
     /// <summary>
     /// Running mean for every I/Q slot (length = 2 * SubcarrierCount).
@@ -126,15 +141,30 @@ public sealed class RoomBaseline
     /// <summary>
     /// Ensures buffers are sized for the given bandwidth and rolling window.
     /// </summary>
-    public void Initialize(int bandwidth, int windowSize = DefaultWindowSize)
+    /// <param name="bandwidth">Bandwidth in MHz (20 or 40).</param>
+    /// <param name="windowSize">Number of frames to keep in the rolling window.</param>
+    /// <param name="csiLength">
+    /// Optional actual I/Q sample count from the CSI payload. When provided, buffers are sized
+    /// to that exact length instead of the theoretical subcarrier count derived from bandwidth.
+    /// </param>
+    public void Initialize(int bandwidth, int windowSize = DefaultWindowSize, int? csiLength = null)
     {
         if (windowSize <= 0)
         {
             throw new ArgumentOutOfRangeException(nameof(windowSize), "Window size must be positive.");
         }
 
+        if (csiLength.HasValue)
+        {
+            int length = csiLength.Value;
+            if (length <= 0 || length % 2 != 0)
+            {
+                throw new ArgumentException("CSI array must contain an even number of interleaved I/Q samples.", nameof(csiLength));
+            }
+        }
+
         _bandwidth = bandwidth;
-        _subcarrierCount = GetSubcarrierCount(bandwidth);
+        _subcarrierCount = csiLength.HasValue ? csiLength.Value / 2 : GetSubcarrierCount(bandwidth);
         InitializeCore(windowSize);
     }
 
@@ -164,13 +194,8 @@ public sealed class RoomBaseline
     /// When <paramref name="dt"/> is supplied, the EMA smoothing is scaled by the elapsed time so
     /// that bursty, non-uniform telemetry is weighted correctly.
     /// </summary>
-    public void Update(double[] csi, TimeSpan? dt = null)
+    public void Update(ReadOnlySpan<double> csi, TimeSpan? dt = null, double scale = 1.0)
     {
-        if (csi is null)
-        {
-            throw new ArgumentNullException(nameof(csi));
-        }
-
         if (!_isInitialized)
         {
             throw new InvalidOperationException("Initialize must be called before Update.");
@@ -184,8 +209,6 @@ public sealed class RoomBaseline
         }
 
         Debug.Assert(_ringBuffer.Length == _slotCount * _windowSize, "Ring buffer must be fully initialized.");
-
-        var csiSpan = csi.AsSpan();
 
         // Evict the oldest frame if the window is already full.
         if (_totalFrames >= _windowSize)
@@ -217,21 +240,19 @@ public sealed class RoomBaseline
             }
         }
 
-        // Write the new frame into the circular ring buffer.
-        var writeSpan = _ringBuffer.AsSpan(_head * _slotCount, _slotCount);
-        csiSpan.CopyTo(writeSpan);
-        _head = (_head + 1) % _windowSize;
-        _totalFrames++;
-
         // Compute per-frame EMA alpha once; when dt is known, scale it by the
         // elapsed time relative to the nominal sample interval.
         double alpha = ComputeEmaAlpha(dt);
         double oneMinusAlpha = 1.0 - alpha;
 
-        // Add the new frame to the running Welford and EMA statistics.
+        // Write the scaled new frame into the ring buffer and add it to the
+        // running Welford and EMA statistics in one pass.
+        var writeSpan = _ringBuffer.AsSpan(_head * _slotCount, _slotCount);
         for (int i = 0; i < _slotCount; i++)
         {
-            var x = csiSpan[i];
+            double x = csi[i] * scale;
+            writeSpan[i] = x;
+
             var n = _counts[i] + 1;
             _counts[i] = n;
 
@@ -244,6 +265,9 @@ public sealed class RoomBaseline
 
             _ema[i] = n == 1 ? x : (alpha * x) + (oneMinusAlpha * _ema[i]);
         }
+
+        _head = (_head + 1) % _windowSize;
+        _totalFrames++;
     }
 
     private double ComputeEmaAlpha(TimeSpan? dt)
@@ -291,6 +315,39 @@ public sealed class RoomBaseline
             }
         }
         return max;
+    }
+
+    private double ComputePercentileVariance(double percentile)
+    {
+        if (_slotCount == 0)
+        {
+            return 0.0;
+        }
+
+        percentile = Math.Clamp(percentile, 0.0, 1.0);
+
+        var scratch = ArrayPool<double>.Shared.Rent(_slotCount);
+        try
+        {
+            _variance.AsSpan().CopyTo(scratch);
+            Array.Sort(scratch, 0, _slotCount);
+
+            double index = percentile * (_slotCount - 1);
+            int lower = (int)Math.Floor(index);
+            int upper = (int)Math.Ceiling(index);
+
+            if (lower == upper)
+            {
+                return scratch[lower];
+            }
+
+            double fraction = index - lower;
+            return scratch[lower] + fraction * (scratch[upper] - scratch[lower]);
+        }
+        finally
+        {
+            ArrayPool<double>.Shared.Return(scratch, clearArray: false);
+        }
     }
 
     /// <summary>

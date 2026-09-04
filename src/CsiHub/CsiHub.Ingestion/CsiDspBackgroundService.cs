@@ -80,18 +80,6 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
 
                 var key = (NodeMac: payload.Mac!, SrcMac: payload.SrcMac ?? 0UL);
 
-                if (payload.Bandwidth.HasValue)
-                {
-                    var baseline = _baselines.GetOrAdd(
-                        key,
-                        _ => new RoomBaseline { Mac = FormatMac(key.SrcMac) });
-
-                    if (baseline.Bandwidth != payload.Bandwidth.Value)
-                    {
-                        baseline.Initialize(payload.Bandwidth.Value, RoomBaseline.DefaultWindowSize);
-                    }
-                }
-
                 if (payload.Type == "csi" && payload.Csi is not null)
                 {
                     var csiBaseline = _baselines.GetOrAdd(
@@ -102,16 +90,22 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
                     {
                         if (payload.Bandwidth.HasValue)
                         {
-                            csiBaseline.Initialize(payload.Bandwidth.Value, RoomBaseline.DefaultWindowSize);
+                            csiBaseline.Initialize(payload.Bandwidth.Value, RoomBaseline.DefaultWindowSize, payload.Csi.Length);
                         }
                         else
                         {
                             csiBaseline.InitializeFromLength(payload.Csi.Length, RoomBaseline.DefaultWindowSize);
                         }
                     }
-                    else if (payload.Bandwidth.HasValue && csiBaseline.Bandwidth != payload.Bandwidth.Value)
+                    else if (payload.Bandwidth.HasValue &&
+                             (csiBaseline.Bandwidth != payload.Bandwidth.Value ||
+                              csiBaseline.SubcarrierCount * 2 != payload.Csi.Length))
                     {
-                        csiBaseline.Initialize(payload.Bandwidth.Value, RoomBaseline.DefaultWindowSize);
+                        csiBaseline.Initialize(payload.Bandwidth.Value, RoomBaseline.DefaultWindowSize, payload.Csi.Length);
+                    }
+                    else if (csiBaseline.SubcarrierCount * 2 != payload.Csi.Length)
+                    {
+                        csiBaseline.InitializeFromLength(payload.Csi.Length, RoomBaseline.DefaultWindowSize);
                     }
 
                     TimeSpan? dt = null;
@@ -120,7 +114,7 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
                         dt = payload.ReceivedAt - last;
                     }
 
-                    csiBaseline.Update(payload.Csi, dt);
+                    csiBaseline.Update(payload.Csi, dt, RoomBaseline.CsiInputScale);
                     _lastUpdateAt[key] = payload.ReceivedAt;
                 }
 

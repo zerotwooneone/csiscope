@@ -554,6 +554,7 @@ void RfManager::emitCsi(wifi_csi_info_t* info, const int8_t* csiBuf, uint16_t cs
     s_csiDoc["seq"] = _csiSeq++;
     s_csiDoc["t"] = SyncManager::syncedMicros();
     s_csiDoc["rssi"] = static_cast<int>(info->rx_ctrl.rssi);
+    s_csiDoc["bw"] = info->rx_ctrl.cwb ? 40 : 20;
 
     // info->buf is int8_t* with interleaved signed I/Q samples.
     // Cast each byte to int so ArduinoJson stores a signed number, not a byte/char.

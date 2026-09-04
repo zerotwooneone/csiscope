@@ -293,7 +293,10 @@
 }
 else
 {
-    @foreach (var group in GetBaselineDiagnostics().GroupBy(d => d.SrcMac).OrderBy(g => g.Key))
+    @foreach (var group in GetBaselineDiagnostics()
+        .GroupBy(d => d.SrcMac)
+        .Where(g => g.Sum(d => d.FrameCount) >= 50)
+        .OrderByDescending(g => g.Sum(d => d.FrameCount)))
     {
         <div class="card mb-3">
             <div class="card-header">
@@ -301,7 +304,7 @@ else
             </div>
             <div class="card-body">
                 <div class="row text-center">
-                    @foreach (var diag in group.OrderBy(d => d.NodeMac))
+                    @foreach (var diag in group.OrderByDescending(d => d.FrameCount))
                     {
                         <div class="col-md-4">
                             <h6>@diag.NodeMac</h6>
