@@ -1,4 +1,7 @@
 #include "SerialManager.h"
+#include "SerialFraming.h"
+#include "SerialTxQueue.h"
+#include "Crc32.h"
 #include "config.h"
 #include "HardwareDiagnostics.h"
 #include "ImuManager.h"
@@ -28,6 +31,7 @@ void SerialManager::begin()
     head = 0;
     tail = 0;
     overflow = false;
+    SerialTxQueue::begin();
 }
 
 void SerialManager::process()
@@ -35,8 +39,12 @@ void SerialManager::process()
     // Pull every available byte from the UART hardware in a single non-blocking pass.
     ingestFromSerial();
 
-    // Drain all complete NDJSON lines that have accumulated since the last loop.
-    processLines();
+    // Drain all complete length-prefixed frames that have accumulated since the last loop.
+    processFrames();
+
+    // Push any enqueued telemetry/commands to the USB-CDC TX ring. This is
+    // done outside of the Wi-Fi callback to avoid task watchdog timeouts.
+    SerialTxQueue::drain();
 }
 
 const char* SerialManager::stateToString(SystemState state)
@@ -98,59 +106,110 @@ bool SerialManager::pushByte(char c)
     return true;
 }
 
-void SerialManager::processLines()
+void SerialManager::processFrames()
 {
-    char line[LINE_BUFFER_SIZE];
-    while (tryReadLine(line, sizeof(line)))
+    char payload[LINE_BUFFER_SIZE];
+    size_t len = 0;
+    while (tryReadFrame(payload, sizeof(payload), &len))
     {
-        parseAndDispatch(line);
+        parseAndDispatch(payload);
     }
 }
 
-bool SerialManager::tryReadLine(char* line, size_t maxLen)
+bool SerialManager::tryReadFrame(char* payload, size_t maxPayload, size_t* outLen)
 {
-    if (head == tail)
+    if (payload == nullptr || outLen == nullptr)
     {
         return false;
     }
 
-    size_t scan = tail;
-    size_t count = 0;
-    bool foundTerminator = false;
-
-    // Scan forward for a newline, wrapping around the ring if necessary.
-    while (scan != head)
+    while (true)
     {
-        char c = rxBuffer[scan];
-        if (c == '\n' || c == '\r')
+        size_t available = (head + RX_BUFFER_SIZE - tail) % RX_BUFFER_SIZE;
+
+        // Need at least the magic bytes to scan for a frame.
+        if (available < 2)
         {
-            foundTerminator = true;
-            break;
+            return false;
         }
-        scan = (scan + 1) % RX_BUFFER_SIZE;
-        ++count;
+
+        // Search for the magic sequence, discarding leading noise.
+        bool foundMagic = false;
+        while (available >= 2)
+        {
+            uint8_t first = static_cast<uint8_t>(rxBuffer[tail]);
+            uint8_t second = static_cast<uint8_t>(rxBuffer[(tail + 1) % RX_BUFFER_SIZE]);
+            if (first == SerialFraming::MagicHigh && second == SerialFraming::MagicLow)
+            {
+                foundMagic = true;
+                break;
+            }
+
+            tail = (tail + 1) % RX_BUFFER_SIZE;
+            --available;
+        }
+
+        if (!foundMagic || available < 2)
+        {
+            return false;
+        }
+
+        // Need the full 4-byte header.
+        if (available < 4)
+        {
+            return false;
+        }
+
+        uint8_t lenLow = static_cast<uint8_t>(rxBuffer[(tail + 2) % RX_BUFFER_SIZE]);
+        uint8_t lenHigh = static_cast<uint8_t>(rxBuffer[(tail + 3) % RX_BUFFER_SIZE]);
+        uint16_t payloadLen = (static_cast<uint16_t>(lenHigh) << 8) | lenLow;
+
+        if (payloadLen == 0 || payloadLen > maxPayload)
+        {
+            // Bogus length; drop the magic byte and resync.
+            tail = (tail + 1) % RX_BUFFER_SIZE;
+            continue;
+        }
+
+        size_t frameTotal = 4 + payloadLen + 4;
+        if (available < frameTotal)
+        {
+            // Whole frame not yet received; wait for more bytes.
+            return false;
+        }
+
+        // Copy the payload and compute the CRC over length + payload.
+        for (size_t i = 0; i < payloadLen; ++i)
+        {
+            payload[i] = rxBuffer[(tail + 4 + i) % RX_BUFFER_SIZE];
+        }
+        payload[payloadLen] = '\0';
+
+        uint32_t expectedCrc = 0;
+        for (int i = 0; i < 4; ++i)
+        {
+            expectedCrc |= static_cast<uint32_t>(
+                static_cast<uint8_t>(rxBuffer[(tail + 4 + payloadLen + i) % RX_BUFFER_SIZE])) << (i * 8);
+        }
+
+        uint8_t lenBytes[2] = { lenLow, lenHigh };
+        uint32_t actualCrc = Crc32::update(0xFFFFFFFF, lenBytes, 2);
+        actualCrc = Crc32::update(actualCrc, reinterpret_cast<const uint8_t*>(payload), payloadLen);
+        actualCrc = ~actualCrc;
+
+        if (actualCrc != expectedCrc)
+        {
+            // Corrupt frame; drop the magic byte and resync.
+            tail = (tail + 1) % RX_BUFFER_SIZE;
+            continue;
+        }
+
+        // Valid frame; consume it and return the payload.
+        *outLen = payloadLen;
+        tail = (tail + frameTotal) % RX_BUFFER_SIZE;
+        overflow = false;
+        return true;
     }
-
-    if (!foundTerminator)
-    {
-        return false;
-    }
-
-    // Copy at most maxLen - 1 characters so the buffer is always null terminated.
-    size_t copyLen = (count < maxLen - 1) ? count : maxLen - 1;
-    size_t src = tail;
-    for (size_t k = 0; k < copyLen; ++k)
-    {
-        line[k] = rxBuffer[src];
-        src = (src + 1) % RX_BUFFER_SIZE;
-    }
-    line[copyLen] = '\0';
-
-    // Advance the consumer tail past the line and its terminator.
-    tail = (scan + 1) % RX_BUFFER_SIZE;
-    overflow = false;
-
-    return true;
 }
 
 void SerialManager::parseAndDispatch(const char* line)
@@ -166,9 +225,11 @@ void SerialManager::parseAndDispatch(const char* line)
     const char* cmd = doc["cmd"];
     if (!cmd || *cmd == '\0')
     {
-        // Not every NDJSON line from the host is a command; ignore silently.
+        // Not every framed JSON from the host is a command; ignore silently.
         return;
     }
+
+    int32_t seq = doc["seq"] | 0;
 
     if (strcmp(cmd, "get_config") == 0)
     {
@@ -179,7 +240,7 @@ void SerialManager::parseAndDispatch(const char* line)
         const char* type = doc["type"];
         if (!type)
         {
-            sendError("diag_test", "missing_or_invalid_type");
+            sendAck("diag_test", false, seq, "missing_or_invalid_type");
             return;
         }
 
@@ -187,18 +248,18 @@ void SerialManager::parseAndDispatch(const char* line)
         {
             currentState = SystemState::STATE_DIAG_SYNC;
             HardwareDiagnostics::setLedState(currentState);
-            sendAck("diag_test", true);
+            sendAck("diag_test", true, seq);
         }
         else if (strcmp(type, "rf") == 0)
         {
             currentState = SystemState::STATE_DIAG_RF;
             HardwareDiagnostics::setLedState(currentState);
             RfManager::startSweep();
-            sendAck("diag_test", true);
+            sendAck("diag_test", true, seq);
         }
         else
         {
-            sendError("diag_test", "unknown_type");
+            sendAck("diag_test", false, seq, "unknown_type");
         }
     }
     else if (strcmp(cmd, "set_rf") == 0)
@@ -206,7 +267,7 @@ void SerialManager::parseAndDispatch(const char* line)
         int ch = doc["ch"] | 0;
         if (ch < 1 || ch > 13)
         {
-            sendError("set_rf", "invalid_channel");
+            sendAck("set_rf", false, seq, "invalid_channel");
             return;
         }
 
@@ -219,12 +280,12 @@ void SerialManager::parseAndDispatch(const char* line)
             JsonArrayConst macFilters = doc["mac_filter"].as<JsonArrayConst>();
             if (macFilters.isNull() || macFilters.size() == 0)
             {
-                sendError("set_rf", "missing_mac_filter");
+                sendAck("set_rf", false, seq, "missing_mac_filter");
                 return;
             }
             if (macFilters.size() > RfManager::MaxTargetMacs)
             {
-                sendError("set_rf", "too_many_mac_filters");
+                sendAck("set_rf", false, seq, "too_many_mac_filters");
                 return;
             }
 
@@ -235,7 +296,7 @@ void SerialManager::parseAndDispatch(const char* line)
                 const char* s = macFilters[i].as<const char*>();
                 if (s == nullptr || *s == '\0')
                 {
-                    sendError("set_rf", "invalid_mac_filter");
+                    sendAck("set_rf", false, seq, "invalid_mac_filter");
                     return;
                 }
                 macStrings[macCount++] = s;
@@ -243,13 +304,13 @@ void SerialManager::parseAndDispatch(const char* line)
 
             if (!RfManager::startPassive(static_cast<uint8_t>(ch), static_cast<uint8_t>(bw), macStrings, macCount))
             {
-                sendError("set_rf", "invalid_mac_filter");
+                sendAck("set_rf", false, seq, "invalid_mac_filter");
                 return;
             }
 
             currentState = SystemState::STATE_STREAMING;
             HardwareDiagnostics::setLedState(currentState);
-            sendAck("set_rf", true);
+            sendAck("set_rf", true, seq);
             return;
         }
 
@@ -259,12 +320,12 @@ void SerialManager::parseAndDispatch(const char* line)
         int dwellMs = doc["dwell_ms"] | 250;
         if (dwellMs < 50 || dwellMs > 5000)
         {
-            sendError("set_rf", "invalid_dwell");
+            sendAck("set_rf", false, seq, "invalid_dwell");
             return;
         }
 
         RfManager::startSingleChannelScan(static_cast<uint8_t>(ch), static_cast<uint16_t>(dwellMs));
-        sendAck("set_rf", true);
+        sendAck("set_rf", true, seq);
     }
     else if (strcmp(cmd, "set_features") == 0)
     {
@@ -276,12 +337,12 @@ void SerialManager::parseAndDispatch(const char* line)
 
         if (!syncOk)
         {
-            sendError("set_features", "sync_init_failed", "clock_leader");
+            sendAck("set_features", false, seq, "sync_init_failed");
         }
 
         if (!imuOk)
         {
-            sendError("set_features", "imu_init_failed", "imu_host");
+            sendAck("set_features", false, seq, "imu_init_failed");
         }
 
         if (!syncOk || !imuOk)
@@ -289,20 +350,21 @@ void SerialManager::parseAndDispatch(const char* line)
             return;
         }
 
-        sendAck("set_features", true);
+        sendAck("set_features", true, seq);
     }
     else if (strcmp(cmd, "reboot") == 0)
     {
-        sendAck("reboot", true);
+        sendAck("reboot", true, seq);
 
-        // Flush the outgoing NDJSON ack before resetting the SoC.
-        Serial.flush();
+        // Send the ack through the staging queue, then reset. The queue does
+        // not block, so a stalled host cannot hold the SoC in a flush().
+        SerialTxQueue::drain();
 
         ESP.restart();
     }
     else
     {
-        sendError(cmd, "unknown_command");
+        sendAck(cmd, false, seq, "unknown_command");
     }
 }
 
@@ -317,25 +379,25 @@ void SerialManager::sendConfig()
     doc["bw"] = Config::CSI_BANDWIDTH;
     doc["version"] = "0.1.0";
 
-    serializeJson(doc, Serial);
-    Serial.println();
+    SerialFraming::sendFramedJson(doc);
 }
 
-void SerialManager::sendAck(const char* cmd, bool success, const char* reason)
+void SerialManager::sendAck(const char* cmd, bool success, int32_t seq, const char* reason)
 {
     static JsonDocument doc;
     doc.clear();
     doc["type"] = "ack";
     doc["cmd"] = cmd;
     doc["success"] = success;
+    doc["seq"] = seq;
     if (reason && *reason)
     {
         doc["reason"] = reason;
     }
     doc["state"] = stateToString(currentState);
+    doc["mac"] = nodeMacAddress;
 
-    serializeJson(doc, Serial);
-    Serial.println();
+    SerialFraming::sendFramedJson(doc);
 }
 
 void SerialManager::sendError(const char* cmd, const char* reason, const char* param)
@@ -351,6 +413,5 @@ void SerialManager::sendError(const char* cmd, const char* reason, const char* p
         doc["param"] = param;
     }
 
-    serializeJson(doc, Serial);
-    Serial.println();
+    SerialFraming::sendFramedJson(doc);
 }

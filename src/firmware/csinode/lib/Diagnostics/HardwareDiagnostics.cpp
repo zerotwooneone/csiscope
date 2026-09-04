@@ -1,4 +1,5 @@
 #include "HardwareDiagnostics.h"
+#include "SerialFraming.h"
 #include "esp_system.h"
 #include "esp_mac.h"
 #include "LedManager.h"
@@ -14,7 +15,9 @@ void HardwareDiagnostics::checkClockSpeeds()
 {
     // Measures CPU core clocks on boot[cite: 1]
     uint32_t cpuFreq = getCpuFrequencyMhz();
-    Serial.printf("{\"type\":\"post\",\"metric\":\"cpu_mhz\",\"value\":%d}\n", cpuFreq);
+    char postCpu[64];
+    snprintf(postCpu, sizeof(postCpu), "{\"type\":\"post\",\"metric\":\"cpu_mhz\",\"value\":%d}\n", cpuFreq);
+    SerialFraming::sendFramedText(postCpu);
 }
 
 void HardwareDiagnostics::checkMemoryAllocation()
@@ -22,8 +25,12 @@ void HardwareDiagnostics::checkMemoryAllocation()
     // Validates 16MB Flash and 8MB PSRAM allocation buffers[cite: 1]
     uint32_t psramSize = ESP.getPsramSize();
     uint32_t flashSize = ESP.getFlashChipSize();
-    Serial.printf("{\"type\":\"post\",\"metric\":\"psram_bytes\",\"value\":%d}\n", psramSize);
-    Serial.printf("{\"type\":\"post\",\"metric\":\"flash_bytes\",\"value\":%d}\n", flashSize);
+    char postPsram[64];
+    char postFlash[64];
+    snprintf(postPsram, sizeof(postPsram), "{\"type\":\"post\",\"metric\":\"psram_bytes\",\"value\":%d}\n", psramSize);
+    snprintf(postFlash, sizeof(postFlash), "{\"type\":\"post\",\"metric\":\"flash_bytes\",\"value\":%d}\n", flashSize);
+    SerialFraming::sendFramedText(postPsram);
+    SerialFraming::sendFramedText(postFlash);
 }
 
 bool HardwareDiagnostics::scanForBno085()
@@ -33,13 +40,13 @@ bool HardwareDiagnostics::scanForBno085()
     Wire.beginTransmission(Config::BNO085_ADDR_DEFAULT);
     if (Wire.endTransmission() == 0)
     {
-        Serial.println("{\"type\":\"diag\",\"sensor\":\"bno085\",\"status\":\"found\"}");
+        SerialFraming::sendFramedText("{\"type\":\"diag\",\"sensor\":\"bno085\",\"status\":\"found\"}\n");
         return true;
     }
     else
     {
         // Logs an expected IMU_NOT_FOUND warning without halting boot[cite: 1]
-        Serial.println("{\"type\":\"diag\",\"sensor\":\"bno085\",\"status\":\"IMU_NOT_FOUND\"}");
+        SerialFraming::sendFramedText("{\"type\":\"diag\",\"sensor\":\"bno085\",\"status\":\"IMU_NOT_FOUND\"}\n");
         return false;
     }
 }

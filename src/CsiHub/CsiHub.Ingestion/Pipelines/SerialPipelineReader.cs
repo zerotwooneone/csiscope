@@ -1,4 +1,6 @@
 using System.Buffers;
+using System.Collections.Concurrent;
+using System.IO.Hashing;
 using System.IO.Pipelines;
 using System.Text;
 using System.Text.Json;
@@ -18,7 +20,6 @@ namespace CsiHub.Ingestion.Pipelines;
 public sealed class SerialPipelineReader
 {
     private static readonly JsonSerializerOptions JsonOptions = new();
-    private static readonly byte[] NewLineBytes = Encoding.UTF8.GetBytes("\n");
 
     private readonly string _portName;
     private readonly Func<ISerialPort> _portFactory;
@@ -26,9 +27,12 @@ public sealed class SerialPipelineReader
     private readonly CsiIngestionChannel _channel;
     private readonly ILogger _logger;
     private readonly Channel<string> _commandChannel;
+    private readonly ConcurrentDictionary<int, TaskCompletionSource<Ack>> _pendingAcks = new();
 
     private string? _lastMac;
     private NodeConnectionState _lastState = NodeConnectionState.Disconnected;
+    private int _nextSeq = 0;
+    private bool _hasSeenConfig;
 
     public SerialPipelineReader(
         string portName,
@@ -63,6 +67,104 @@ public sealed class SerialPipelineReader
         }
 
         return _commandChannel.Writer.TryWrite(json);
+    }
+
+    /// <summary>
+    /// Sends a command and waits for an ACK with matching sequence number.
+    /// The command JSON is decorated with a "seq" field before transmission.
+    /// </summary>
+    public async Task<Ack?> SendCommandAsync(string commandJson, int timeoutMs, int retries, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(commandJson))
+        {
+            throw new ArgumentException("Command JSON cannot be empty.", nameof(commandJson));
+        }
+
+        for (int attempt = 0; attempt < retries; attempt++)
+        {
+            int seq = Interlocked.Increment(ref _nextSeq);
+            string? framedJson = AddSeqToJson(commandJson, seq);
+            if (framedJson is null)
+            {
+                return null;
+            }
+
+            var tcs = new TaskCompletionSource<Ack>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _pendingAcks[seq] = tcs;
+
+            try
+            {
+                if (!TrySendCommand(framedJson))
+                {
+                    _pendingAcks.TryRemove(seq, out _);
+                    _logger.LogWarning("Command channel full; dropping command to {Port}.", _portName);
+                    continue;
+                }
+
+                await tcs.Task.WaitAsync(TimeSpan.FromMilliseconds(timeoutMs), cancellationToken).ConfigureAwait(false);
+                return await tcs.Task.ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                _pendingAcks.TryRemove(seq, out _);
+
+                if (attempt == retries - 1)
+                {
+                    _logger.LogWarning(
+                        "Command to {Port} timed out after {Retries} attempts (timeout {Timeout}ms).",
+                        _portName,
+                        retries,
+                        timeoutMs);
+                    throw;
+                }
+
+                _logger.LogDebug(
+                    "Command to {Port} timed out (attempt {Attempt}/{Retries}); retrying.",
+                    _portName,
+                    attempt + 1,
+                    retries);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                _pendingAcks.TryRemove(seq, out _);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _pendingAcks.TryRemove(seq, out _);
+                _logger.LogWarning(ex, "Command to {Port} failed.", _portName);
+                return null;
+            }
+        }
+
+        return null;
+    }
+
+    private static string? AddSeqToJson(string commandJson, int seq)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(commandJson);
+            var buffer = new System.Buffers.ArrayBufferWriter<byte>();
+            using (var writer = new Utf8JsonWriter(buffer))
+            {
+                writer.WriteStartObject();
+
+                foreach (var property in doc.RootElement.EnumerateObject())
+                {
+                    property.WriteTo(writer);
+                }
+
+                writer.WriteNumber("seq", seq);
+                writer.WriteEndObject();
+            }
+
+            return Encoding.UTF8.GetString(buffer.WrittenSpan);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -118,6 +220,9 @@ public sealed class SerialPipelineReader
         _logger.LogInformation(
             "Opened serial port {Port}.",
             _portName);
+
+        // Wait for the node to announce its config before processing telemetry.
+        _hasSeenConfig = false;
 
         // The first heartbeat or state-bearing payload will publish the real state
         // and carry the node's MAC and uptime, so we do not emit an empty Standby here.
@@ -184,14 +289,14 @@ public sealed class SerialPipelineReader
 
                     ReadOnlySequence<byte> buffer = result.Buffer;
 
-                    while (TryReadLine(ref buffer, out ReadOnlySequence<byte> line))
+                    while (SerialFraming.TryReadFrame(ref buffer, out ReadOnlySequence<byte> frame))
                     {
-                        ProcessLine(line);
+                        ProcessFrame(frame);
                     }
 
-                    // Advance the consumed pointer to the end of the parsed lines and the
-                    // examined pointer to the end of the buffer, preserving any partial
-                    // NDJSON frame across the next ReadAsync call.
+                    // Advance the consumed pointer to the start of the next unprocessed
+                    // frame and the examined pointer to the end of the buffer, preserving
+                    // any partial frame across the next ReadAsync call.
                     reader.AdvanceTo(buffer.Start, buffer.End);
 
                     if (result.IsCompleted)
@@ -240,14 +345,13 @@ public sealed class SerialPipelineReader
                     break;
                 }
 
-                byte[] command = Encoding.UTF8.GetBytes(json);
+                byte[] frame = SerialFraming.CreateFrame(json);
 
                 try
                 {
                     _logger.LogDebug("Serial write to {Port}: {Command}", _portName, json);
 
-                    await port.BaseStream.WriteAsync(command, 0, command.Length, cancellationToken).ConfigureAwait(false);
-                    await port.BaseStream.WriteAsync(NewLineBytes, 0, NewLineBytes.Length, cancellationToken).ConfigureAwait(false);
+                    await port.BaseStream.WriteAsync(frame, 0, frame.Length, cancellationToken).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
@@ -265,36 +369,6 @@ public sealed class SerialPipelineReader
         {
             // Expected on shutdown.
         }
-    }
-
-    private static bool TryReadLine(ref ReadOnlySequence<byte> buffer, out ReadOnlySequence<byte> line)
-    {
-        line = default;
-
-        SequencePosition? position = buffer.PositionOf((byte)'\n');
-        if (position is null)
-        {
-            return false;
-        }
-
-        // Slice the line, excluding the newline terminator.
-        line = buffer.Slice(0, position.Value);
-
-        // Trim a trailing '\r' if the line was terminated with '\r\n'.
-        if (line.Length > 0)
-        {
-            var lastPosition = line.GetPosition(line.Length - 1);
-            if (line.Slice(lastPosition, 1).First.Span[0] == (byte)'\r')
-            {
-                line = line.Slice(0, line.Length - 1);
-            }
-        }
-
-        // Advance the unconsumed buffer to the byte after the newline.
-        var next = buffer.GetPosition(1, position.Value);
-        buffer = buffer.Slice(next);
-
-        return true;
     }
 
     private static bool TryFindFirstNonWhitespace(ReadOnlySequence<byte> line, out byte value)
@@ -318,71 +392,257 @@ public sealed class SerialPipelineReader
         return false;
     }
 
-    private void ProcessLine(ReadOnlySequence<byte> line)
+    private void ProcessFrame(ReadOnlySequence<byte> payload)
     {
-        if (line.Length == 0)
+        if (payload.Length == 0)
         {
             return;
         }
 
-        if (!TryFindFirstNonWhitespace(line, out byte first) || first != (byte)'{')
-        {
-            int previewLength = (int)Math.Min(line.Length, 200);
-            var preview = line.Slice(0, previewLength).ToArray();
-            var lineText = Encoding.UTF8.GetString(preview);
-
-            _logger.LogWarning(
-                "Ignoring non-JSON-object NDJSON line from {Port}: {Line}",
-                _portName,
-                lineText);
-            return;
-        }
+        byte[]? rented = null;
+        ReadOnlyMemory<byte> memory;
 
         try
         {
-            if (line.IsSingleSegment)
+            if (payload.IsSingleSegment)
             {
-                ProcessSpan(line.First.Span);
+                memory = payload.First;
             }
             else
             {
-                byte[] rented = ArrayPool<byte>.Shared.Rent((int)line.Length);
-                try
+                rented = ArrayPool<byte>.Shared.Rent((int)payload.Length);
+                payload.CopyTo(rented);
+                memory = new ReadOnlyMemory<byte>(rented, 0, (int)payload.Length);
+            }
+
+            ReadOnlySpan<byte> span = memory.Span;
+            using var doc = JsonDocument.Parse(memory);
+            JsonElement root = doc.RootElement;
+
+            if (!_hasSeenConfig)
+            {
+                if (root.TryGetProperty("type", out var typeProp) && typeProp.GetString() == "config")
                 {
-                    line.CopyTo(rented);
-                    ProcessSpan(new ReadOnlySpan<byte>(rented, 0, (int)line.Length));
+                    _hasSeenConfig = true;
+                    ProcessConfig(root);
                 }
-                finally
+                else
                 {
-                    ArrayPool<byte>.Shared.Return(rented, clearArray: false);
+                    _logger.LogDebug("Discarding pre-config frame from {Port}.", _portName);
                 }
+
+                return;
+            }
+
+            if (!root.TryGetProperty("type", out var typeElement) || typeElement.ValueKind != JsonValueKind.String)
+            {
+                return;
+            }
+
+            string? type = typeElement.GetString();
+            switch (type)
+            {
+                case "csi":
+                    ProcessSpan(span);
+                    break;
+
+                case "hb":
+                    ProcessHeartbeat(root);
+                    break;
+
+                case "config":
+                    ProcessConfig(root);
+                    break;
+
+                case "ack":
+                    ProcessAck(root);
+                    break;
+
+                case "error":
+                    ProcessError(root);
+                    break;
+
+                case "rf_scan":
+                    ProcessSpan(span);
+                    break;
+
+                case "boot":
+                case "post":
+                case "diag":
+                case "imu":
+                    _logger.LogDebug("Ignoring telemetry frame of type {Type} from {Port}.", type, _portName);
+                    break;
+
+                default:
+                    _logger.LogWarning("Unknown frame type {Type} from {Port}.", type, _portName);
+                    break;
             }
         }
         catch (JsonException ex)
         {
-            long position = ex.BytePositionInLine ?? 0;
-            int windowStart = (int)Math.Max(0, position - 100);
-            int windowLength = (int)Math.Min(line.Length - windowStart, 200);
-            if (windowLength <= 0)
-            {
-                windowStart = 0;
-                windowLength = (int)Math.Min(line.Length, 200);
-            }
-
-            var window = line.Slice(windowStart, windowLength).ToArray();
-            var windowText = Encoding.UTF8.GetString(window);
-
-            _logger.LogWarning(ex,
-                "Failed to parse NDJSON line from {Port} at position {Position} (length {Length}): {Window}",
-                _portName,
-                position,
-                line.Length,
-                windowText);
+            _logger.LogWarning(ex, "Failed to parse JSON frame from {Port}.", _portName);
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "Failed to process NDJSON line from {Port}.", _portName);
+            _logger.LogDebug(ex, "Failed to process JSON frame from {Port}.", _portName);
         }
+        finally
+        {
+            if (rented is not null)
+            {
+                ArrayPool<byte>.Shared.Return(rented, clearArray: false);
+            }
+        }
+    }
+
+    private void ProcessHeartbeat(JsonElement root)
+    {
+        string? mac = TryReadStringProperty(root, "mac");
+        if (!string.IsNullOrEmpty(mac))
+        {
+            _lastMac = mac;
+        }
+
+        if (!root.TryGetProperty("state", out var stateProp) || stateProp.ValueKind != JsonValueKind.String)
+        {
+            return;
+        }
+
+        long? uptime = TryReadInt64Property(root, "uptime");
+        bool? clockLeader = TryReadBooleanProperty(root, "clock_leader");
+        bool? imuHost = TryReadBooleanProperty(root, "imu_host");
+        int? bandwidth = TryReadInt32Property(root, "bw") ?? TryReadInt32Property(root, "bandwidth");
+
+        PublishState(
+            ParseConnectionState(stateProp.GetString()),
+            uptime,
+            DateTimeOffset.UtcNow,
+            force: true,
+            clockLeader: clockLeader,
+            imuHost: imuHost,
+            bandwidth: bandwidth);
+    }
+
+    private void ProcessConfig(JsonElement root)
+    {
+        string? mac = TryReadStringProperty(root, "mac");
+        if (!string.IsNullOrEmpty(mac))
+        {
+            _lastMac = mac;
+        }
+
+        _logger.LogInformation("Node {Port} config: {Config}", _portName, root.GetRawText());
+
+        if (root.TryGetProperty("state", out var stateProp) && stateProp.ValueKind == JsonValueKind.String)
+        {
+            PublishState(ParseConnectionState(stateProp.GetString()), receivedAt: DateTimeOffset.UtcNow);
+        }
+    }
+
+    private void ProcessAck(JsonElement root)
+    {
+        if (!root.TryGetProperty("seq", out var seqProp) || seqProp.ValueKind != JsonValueKind.Number)
+        {
+            return;
+        }
+
+        int seq = seqProp.GetInt32();
+        string? cmd = TryReadStringProperty(root, "cmd");
+        bool success = TryReadBooleanProperty(root, "success") ?? false;
+        string? reason = TryReadStringProperty(root, "reason");
+        string? state = TryReadStringProperty(root, "state");
+        string? mac = TryReadStringProperty(root, "mac");
+
+        if (!string.IsNullOrEmpty(mac))
+        {
+            _lastMac = mac;
+        }
+
+        if (!string.IsNullOrEmpty(state))
+        {
+            PublishState(ParseConnectionState(state), receivedAt: DateTimeOffset.UtcNow);
+        }
+
+        var ack = new Ack(seq, cmd, success, reason, state);
+        if (_pendingAcks.TryRemove(seq, out var tcs))
+        {
+            tcs.TrySetResult(ack);
+        }
+        else
+        {
+            _logger.LogDebug("Received unsolicited ACK for seq {Seq} on {Port}.", seq, _portName);
+        }
+    }
+
+    private void ProcessError(JsonElement root)
+    {
+        string? cmd = TryReadStringProperty(root, "cmd");
+        string? reason = TryReadStringProperty(root, "reason");
+        string? param = TryReadStringProperty(root, "param");
+        string? state = TryReadStringProperty(root, "state");
+        string? mac = TryReadStringProperty(root, "mac");
+
+        _logger.LogWarning(
+            "Node {Port} error: cmd={Cmd}, param={Param}, reason={Reason}",
+            _portName,
+            cmd,
+            param,
+            reason);
+
+        if (!string.IsNullOrEmpty(mac))
+        {
+            _lastMac = mac;
+        }
+
+        if (!string.IsNullOrEmpty(state))
+        {
+            PublishState(ParseConnectionState(state), receivedAt: DateTimeOffset.UtcNow);
+        }
+    }
+
+    private static string? TryReadStringProperty(JsonElement root, string name)
+    {
+        if (root.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.String)
+        {
+            return prop.GetString();
+        }
+
+        return null;
+    }
+
+    private static bool? TryReadBooleanProperty(JsonElement root, string name)
+    {
+        if (root.TryGetProperty(name, out var prop) &&
+            (prop.ValueKind == JsonValueKind.True || prop.ValueKind == JsonValueKind.False))
+        {
+            return prop.GetBoolean();
+        }
+
+        return null;
+    }
+
+    private static long? TryReadInt64Property(JsonElement root, string name)
+    {
+        if (root.TryGetProperty(name, out var prop) &&
+            prop.ValueKind == JsonValueKind.Number &&
+            prop.TryGetInt64(out var value))
+        {
+            return value;
+        }
+
+        return null;
+    }
+
+    private static int? TryReadInt32Property(JsonElement root, string name)
+    {
+        if (root.TryGetProperty(name, out var prop) &&
+            prop.ValueKind == JsonValueKind.Number &&
+            prop.TryGetInt32(out var value))
+        {
+            return value;
+        }
+
+        return null;
     }
 
     private void ProcessSpan(ReadOnlySpan<byte> json)

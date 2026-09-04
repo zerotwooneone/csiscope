@@ -37,4 +37,14 @@ public sealed class CsiIngestionOptions
     /// are not sent to a reconnected node.
     /// </summary>
     public int CommandChannelCapacity { get; set; } = 32;
+
+    /// <summary>
+    /// Timeout in milliseconds for a host-to-node command to be acknowledged.
+    /// </summary>
+    public int CommandTimeoutMs { get; set; } = 500;
+
+    /// <summary>
+    /// Number of command transmission attempts (including the first) before giving up.
+    /// </summary>
+    public int CommandRetries { get; set; } = 3;
 }

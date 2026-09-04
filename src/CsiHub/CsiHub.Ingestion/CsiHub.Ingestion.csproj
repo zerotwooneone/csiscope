@@ -7,6 +7,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="CsiHub.Ingestion.Tests" />
+    <InternalsVisibleTo Include="CsiHub.Ingestion.IntegrationTests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\CsiHub.Core\CsiHub.Core.csproj" />
   </ItemGroup>
 
@@ -14,6 +19,7 @@
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Options" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="10.0.0" />
+    <PackageReference Include="System.IO.Hashing" Version="9.0.0" />
     <PackageReference Include="System.IO.Ports" Version="10.0.0" />
   </ItemGroup>
 

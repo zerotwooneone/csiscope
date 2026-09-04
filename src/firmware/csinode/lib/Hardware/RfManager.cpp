@@ -2,6 +2,7 @@
 
 #include "HardwareDiagnostics.h"
 #include "protocol_types.h"
+#include "SerialFraming.h"
 #include "SyncManager.h"
 #include <algorithm>
 #include <ArduinoJson.h>
@@ -33,10 +34,13 @@ RfManager::ChannelMetrics RfManager::_metrics = {};
 // Pre-warmed in startPassive() so the callback avoids heap allocations on the hot path.
 static JsonDocument s_csiDoc;
 
-// Large enough for the full CSI payload at 40 MHz with all LTFs enabled
-// plus the NDJSON line terminator (up to ~700-900 I/Q values).
-constexpr size_t CsiJsonBufferSize = 8192;
+// Scratchpad used to format one CSI frame. 4 KiB is sufficient for HT40
+// payloads (~1.5 KiB of signed I/Q samples rendered as JSON).
+constexpr size_t CsiJsonBufferSize = 4096;
 static char s_csiJsonBuffer[CsiJsonBufferSize];
+
+// Separate frame buffer that holds the length-prefixed header + CRC wrapper.
+static uint8_t s_csiFrameBuffer[CsiJsonBufferSize + 8];
 
 // CSI receive callback registered with esp_wifi_set_csi_rx_cb.
 // Defined near the bottom of this file with C linkage.
@@ -262,8 +266,7 @@ void RfManager::emitMetrics()
 
     addTopMacs(doc);
 
-    serializeJson(doc, Serial);
-    Serial.println();
+    SerialFraming::sendFramedJson(doc);
 }
 
 void RfManager::promiscuousCallback(void* buf, wifi_promiscuous_pkt_type_t type)
@@ -590,11 +593,10 @@ void RfManager::emitCsi(wifi_csi_info_t* info, const int8_t* csiBuf, uint16_t cs
         return;
     }
 
-    size_t txBytes = Serial.write(s_csiJsonBuffer, lineLen);
-    if (txBytes != lineLen)
+    if (!SerialFraming::sendFramed(reinterpret_cast<const uint8_t*>(s_csiJsonBuffer), lineLen, s_csiFrameBuffer, sizeof(s_csiFrameBuffer)))
     {
-        // Only part of the line fit in the TX ring buffer.  Emitting the
-        // remainder from a later frame would splice two lines, so drop it.
+        // The staging queue is full; drop this frame rather than block the
+        // Wi-Fi callback.
         return;
     }
 }

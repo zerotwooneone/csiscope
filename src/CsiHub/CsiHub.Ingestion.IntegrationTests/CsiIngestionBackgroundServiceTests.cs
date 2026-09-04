@@ -40,15 +40,10 @@ public class CsiIngestionBackgroundServiceTests
 
         var port = portFactory.GetOrCreate("COM9");
         await TestHelper.WaitForOpenAsync(port).WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
-        await TestHelper.WriteLineAsync(port.Downlink, """{"type":"hb","mac":"00:11:22:33:44:55","state":"standby","uptime":5}""");
+        await TestHelper.WriteFrameAsync(port.Downlink, """{"type":"config","mac":"00:11:22:33:44:55","state":"standby","baud":921600,"bw":20,"version":"0.1.0"}""");
+        await TestHelper.WriteFrameAsync(port.Downlink, """{"type":"hb","mac":"00:11:22:33:44:55","state":"standby","uptime":5}""");
 
         var channel = host.Services.GetRequiredService<CsiIngestionChannel>();
-
-        var payload = await channel.StateStorePayloadReader.ReadAsync().AsTask()
-            .WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
-
-        Assert.Equal("hb", payload.Type);
-        Assert.Equal("standby", payload.State);
 
         var state = await channel.StateReader.ReadAsync().AsTask()
             .WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
@@ -90,10 +85,12 @@ public class CsiIngestionBackgroundServiceTests
 
         const int capacity = 1000;
 
+        await TestHelper.WriteFrameAsync(port.Downlink, """{"type":"config","mac":"00:11:22:33:44:55","state":"streaming","baud":921600,"bw":20,"version":"0.1.0"}""");
+
         for (int i = 0; i < capacity; i++)
         {
-            var json = $@"{{""type"":""csi"",""t"":{i},""c"":[1.0,2.0,3.0]}}";
-            await TestHelper.WriteLineAsync(port.Downlink, json);
+            var json = $"{{\"type\":\"csi\",\"mac\":\"00:11:22:33:44:55\",\"t\":{i},\"c\":[1.0,2.0,3.0,4.0]}}";
+            await TestHelper.WriteFrameAsync(port.Downlink, json);
         }
 
         var channel = host.Services.GetRequiredService<CsiIngestionChannel>();

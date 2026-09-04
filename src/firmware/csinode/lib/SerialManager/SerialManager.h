@@ -12,6 +12,7 @@ public:
 
     static void begin();
     static void process();
+    static void sendConfig();
 
     static const char* stateToString(SystemState state);
 
@@ -22,12 +23,11 @@ private:
     static bool overflow;
 
     static void ingestFromSerial();
-    static void processLines();
-    static bool tryReadLine(char* line, size_t maxLen);
+    static void processFrames();
+    static bool tryReadFrame(char* payload, size_t maxPayload, size_t* outLen);
     static bool pushByte(char c);
     static void parseAndDispatch(const char* line);
 
-    static void sendConfig();
-    static void sendAck(const char* cmd, bool success, const char* reason = nullptr);
+    static void sendAck(const char* cmd, bool success, int32_t seq = 0, const char* reason = nullptr);
     static void sendError(const char* cmd, const char* reason, const char* param = nullptr);
 };

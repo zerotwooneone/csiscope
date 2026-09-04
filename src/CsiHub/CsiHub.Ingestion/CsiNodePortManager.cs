@@ -96,6 +96,28 @@ public sealed class CsiNodePortManager
     }
 
     /// <summary>
+    /// Sends a command to the specified port and waits for a matching ACK,
+    /// retrying up to <see cref="CsiIngestionOptions.CommandRetries"/> times.
+    /// </summary>
+    public async Task<Ack?> SendCommandAsync(
+        string portName,
+        string json,
+        CancellationToken cancellationToken = default)
+    {
+        if (_readers.TryGetValue(portName, out var reader))
+        {
+            return await reader.SendCommandAsync(
+                json,
+                _options.CommandTimeoutMs,
+                _options.CommandRetries,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        _logger.LogWarning("Cannot send command to {Port}; port is not configured.", portName);
+        return null;
+    }
+
+    /// <summary>
     /// Cancels all readers and waits up to five seconds for them to stop.
     /// </summary>
     public async Task StopAsync(CancellationToken cancellationToken = default)

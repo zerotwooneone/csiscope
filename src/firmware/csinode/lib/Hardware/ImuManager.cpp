@@ -1,5 +1,6 @@
 #include "ImuManager.h"
 #include "config.h"
+#include "SerialFraming.h"
 
 BNO08x ImuManager::_imu;
 bool ImuManager::_imuHost = false;
@@ -103,18 +104,18 @@ bool ImuManager::initialize()
     // Use the default I2C address and no INT/RST control pins.
     if (!_imu.begin(Config::BNO085_ADDR_DEFAULT, Wire, -1, -1))
     {
-        Serial.println("{\"type\":\"diag\",\"sensor\":\"bno085\",\"status\":\"init_failed\"}");
+        SerialFraming::sendFramedText("{\"type\":\"diag\",\"sensor\":\"bno085\",\"status\":\"init_failed\"}\n");
         return false;
     }
 
     if (!_imu.enableRotationVector(10))
     {
-        Serial.println("{\"type\":\"diag\",\"sensor\":\"bno085\",\"status\":\"enable_failed\"}");
+        SerialFraming::sendFramedText("{\"type\":\"diag\",\"sensor\":\"bno085\",\"status\":\"enable_failed\"}\n");
         return false;
     }
 
     _initialized = true;
-    Serial.println("{\"type\":\"diag\",\"sensor\":\"bno085\",\"status\":\"init_ok\"}");
+    SerialFraming::sendFramedText("{\"type\":\"diag\",\"sensor\":\"bno085\",\"status\":\"init_ok\"}\n");
     return true;
 }
 

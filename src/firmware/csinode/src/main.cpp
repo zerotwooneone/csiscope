@@ -1,4 +1,6 @@
 #include <Arduino.h>
+#include <Wire.h>
+#include <SPI.h>
 #include <ArduinoJson.h>
 #include "config.h"
 #include "protocol_types.h"
@@ -6,6 +8,7 @@
 #include "ImuManager.h"
 #include "LedManager.h"
 #include "RfManager.h"
+#include "SerialFraming.h"
 #include "SerialManager.h"
 #include "SyncManager.h"
 
@@ -44,8 +47,7 @@ void setup()
   JsonDocument bootDoc;
   bootDoc["type"] = "boot";
   bootDoc["mac"] = nodeMacAddress;
-  serializeJson(bootDoc, Serial);
-  Serial.println();
+  SerialFraming::sendFramedJson(bootDoc);
 
   HardwareDiagnostics::executePOST();
   HardwareDiagnostics::scanForBno085();
@@ -53,6 +55,9 @@ void setup()
   // Transition to Standby
   currentState = SystemState::STATE_STANDBY;
   HardwareDiagnostics::setLedState(currentState);
+
+  // Announce the node's identity and capabilities to the host.
+  SerialManager::sendConfig();
 }
 
 void loop()
@@ -88,8 +93,7 @@ void loop()
       hbDoc["clock_leader"] = SyncManager::isLeader();
       hbDoc["imu_host"] = ImuManager::isHost();
 
-      serializeJson(hbDoc, Serial);
-      Serial.println();
+      SerialFraming::sendFramedJson(hbDoc);
     }
     break;
 
@@ -108,8 +112,7 @@ void loop()
         imuDoc["qx"] = qx;
         imuDoc["qy"] = qy;
         imuDoc["qz"] = qz;
-        serializeJson(imuDoc, Serial);
-        Serial.println();
+        SerialFraming::sendFramedJson(imuDoc);
       }
     }
     break;
