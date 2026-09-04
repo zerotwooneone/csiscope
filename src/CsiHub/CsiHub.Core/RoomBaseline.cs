@@ -74,6 +74,26 @@ public sealed class RoomBaseline
     public bool IsInitialized => _slotCount > 0;
 
     /// <summary>
+    /// Total number of CSI frames added to the baseline.
+    /// </summary>
+    public long TotalFrames => _totalFrames;
+
+    /// <summary>
+    /// Mean magnitude across all I/Q slots.
+    /// </summary>
+    public double MeanIq => ComputeMeanIq();
+
+    /// <summary>
+    /// Maximum population variance across all I/Q slots.
+    /// </summary>
+    public double MaxSlotVariance => ComputeMaxVariance();
+
+    /// <summary>
+    /// True once the rolling window has filled and the per-slot variance has stabilized.
+    /// </summary>
+    public bool IsConverged => _totalFrames >= _windowSize && MaxSlotVariance < 0.5;
+
+    /// <summary>
     /// Running mean for every I/Q slot (length = 2 * SubcarrierCount).
     /// </summary>
     public Span<double> Mean => _welfordMean.AsSpan();
@@ -238,6 +258,39 @@ public sealed class RoomBaseline
         // alpha(dt) = 1 - (1 - alpha)^(dt * sampleRate)
         double intervals = dt.Value.TotalSeconds * _sampleRateHz;
         return 1.0 - Math.Pow(1.0 - _emaAlpha, intervals);
+    }
+
+    private double ComputeMeanIq()
+    {
+        if (_slotCount == 0)
+        {
+            return 0.0;
+        }
+
+        double sum = 0.0;
+        for (int i = 0; i < _slotCount; i++)
+        {
+            sum += _welfordMean[i];
+        }
+        return sum / _slotCount;
+    }
+
+    private double ComputeMaxVariance()
+    {
+        if (_slotCount == 0)
+        {
+            return 0.0;
+        }
+
+        double max = 0.0;
+        for (int i = 0; i < _slotCount; i++)
+        {
+            if (_variance[i] > max)
+            {
+                max = _variance[i];
+            }
+        }
+        return max;
     }
 
     /// <summary>

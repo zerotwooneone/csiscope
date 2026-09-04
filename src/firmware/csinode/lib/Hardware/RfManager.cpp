@@ -22,9 +22,8 @@ bool RfManager::_passiveActive = false;
 uint8_t RfManager::_singleChannel = 0;
 uint8_t RfManager::_passiveChannel = 0;
 uint8_t RfManager::_passiveBw = 0;
-String RfManager::_passiveMacFilter;
-RfManager::MacAddress RfManager::_passiveTargetMac = {};
-bool RfManager::_passiveTargetMacSet = false;
+std::array<RfManager::MacAddress, RfManager::MaxTargetMacs> RfManager::_passiveTargetMacs = {};
+size_t RfManager::_passiveTargetMacCount = 0;
 uint16_t RfManager::_dwellMs = 500;
 uint8_t RfManager::_channelIndex = 0;
 uint32_t RfManager::_csiSeq = 0;
@@ -54,9 +53,8 @@ void RfManager::begin()
     _singleChannel = 0;
     _passiveChannel = 0;
     _passiveBw = 0;
-    _passiveMacFilter = String();
-    _passiveTargetMac = {};
-    _passiveTargetMacSet = false;
+    _passiveTargetMacs = {};
+    _passiveTargetMacCount = 0;
     _csiSeq = 0;
     _channelIndex = 0;
     resetMetrics(_channels[0]);
@@ -146,17 +144,32 @@ void RfManager::setChannel(uint8_t channel)
     esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
 }
 
-void RfManager::startPassive(uint8_t channel, uint8_t bw, const char* macFilter)
+bool RfManager::startPassive(uint8_t channel, uint8_t bw, const char* const* macFilters, size_t count)
 {
     _sweepActive = false;
     _singleChannelActive = false;
     _passiveActive = true;
     _passiveChannel = channel;
     _passiveBw = bw;
-    _passiveMacFilter = macFilter != nullptr ? String(macFilter) : String();
-    _passiveTargetMac = {};
-    _passiveTargetMacSet = parsePassiveTargetMac();
+    _passiveTargetMacs = {};
+    _passiveTargetMacCount = 0;
     _csiSeq = 0;
+
+    if (count == 0 || count > MaxTargetMacs)
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i < count; ++i)
+    {
+        if (macFilters[i] == nullptr || !parseMacString(macFilters[i], _passiveTargetMacs[i]))
+        {
+            _passiveActive = false;
+            _passiveTargetMacCount = 0;
+            return false;
+        }
+    }
+    _passiveTargetMacCount = count;
 
     ensureStarted();
 
@@ -180,6 +193,8 @@ void RfManager::startPassive(uint8_t channel, uint8_t bw, const char* macFilter)
     wifi_second_chan_t second = (bw >= 40) ? WIFI_SECOND_CHAN_ABOVE : WIFI_SECOND_CHAN_NONE;
     esp_wifi_set_channel(channel, second);
     esp_wifi_set_promiscuous(true);
+
+    return true;
 }
 
 void RfManager::ensureStarted()
@@ -411,14 +426,13 @@ String RfManager::formatMac(const MacAddress& mac)
     return String(buf);
 }
 
-bool RfManager::parsePassiveTargetMac()
+bool RfManager::parseMacString(const char* s, MacAddress& out)
 {
-    if (_passiveMacFilter.length() == 0)
+    if (s == nullptr || *s == '\0')
     {
         return false;
     }
 
-    const char* s = _passiveMacFilter.c_str();
     unsigned int a = 0, b = 0, c = 0, d = 0, e = 0, f = 0;
 
     if (std::sscanf(s, "%2x:%2x:%2x:%2x:%2x:%2x", &a, &b, &c, &d, &e, &f) != 6)
@@ -430,25 +444,30 @@ bool RfManager::parsePassiveTargetMac()
         }
     }
 
-    _passiveTargetMac = {
-        static_cast<uint8_t>(a),
-        static_cast<uint8_t>(b),
-        static_cast<uint8_t>(c),
-        static_cast<uint8_t>(d),
-        static_cast<uint8_t>(e),
-        static_cast<uint8_t>(f)
-    };
+    out[0] = static_cast<uint8_t>(a);
+    out[1] = static_cast<uint8_t>(b);
+    out[2] = static_cast<uint8_t>(c);
+    out[3] = static_cast<uint8_t>(d);
+    out[4] = static_cast<uint8_t>(e);
+    out[5] = static_cast<uint8_t>(f);
 
     return true;
 }
 
-bool RfManager::matchesTargetMac(const uint8_t* mac)
+bool RfManager::matchesAnyTargetMac(const uint8_t* mac)
 {
-    if (!_passiveTargetMacSet || mac == nullptr)
+    if (_passiveTargetMacCount == 0 || mac == nullptr)
     {
         return false;
     }
-    return std::memcmp(mac, _passiveTargetMac.data(), _passiveTargetMac.size()) == 0;
+    for (size_t i = 0; i < _passiveTargetMacCount; ++i)
+    {
+        if (std::memcmp(mac, _passiveTargetMacs[i].data(), 6) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 void RfManager::prewarmCsiDoc()
@@ -489,8 +508,8 @@ void RfManager::handleCsi(wifi_csi_info_t* info)
         return;
     }
 
-    // MAC filter: only frames transmitted by the target address are serialized.
-    if (_passiveTargetMacSet && !matchesTargetMac(info->mac))
+    // MAC filter: only frames from one of the configured target addresses are serialized.
+    if (_passiveTargetMacCount > 0 && !matchesAnyTargetMac(info->mac))
     {
         return;
     }
@@ -519,6 +538,16 @@ void RfManager::emitCsi(wifi_csi_info_t* info, const int8_t* csiBuf, uint16_t cs
     s_csiDoc.clear();
     s_csiDoc["type"] = "csi";
     s_csiDoc["mac"] = nodeMacAddress;
+
+    // Pack the transmitter MAC into a big-endian 64-bit integer to avoid
+    // per-frame string allocation on the host.
+    uint64_t srcMac = 0;
+    for (int i = 0; i < 6; ++i)
+    {
+        srcMac = (srcMac << 8) | static_cast<uint8_t>(info->mac[i]);
+    }
+    s_csiDoc["src"] = srcMac;
+
     s_csiDoc["seq"] = _csiSeq++;
     s_csiDoc["t"] = SyncManager::syncedMicros();
     s_csiDoc["rssi"] = static_cast<int>(info->rx_ctrl.rssi);
@@ -549,10 +578,23 @@ void RfManager::emitCsi(wifi_csi_info_t* info, const int8_t* csiBuf, uint16_t cs
     s_csiJsonBuffer[written + 1] = '\0';
     size_t lineLen = written + 1;
 
+    if (s_csiDoc.isNull())
+    {
+        // The JsonDocument could not allocate the root object; do not emit a
+        // literal `null` that the host cannot parse as a NodePayload.
+        return;
+    }
+
     if (Serial.availableForWrite() < static_cast<int>(lineLen))
     {
         return;
     }
 
-    Serial.write(s_csiJsonBuffer, lineLen);
+    size_t txBytes = Serial.write(s_csiJsonBuffer, lineLen);
+    if (txBytes != lineLen)
+    {
+        // Only part of the line fit in the TX ring buffer.  Emitting the
+        // remainder from a later frame would splice two lines, so drop it.
+        return;
+    }
 }

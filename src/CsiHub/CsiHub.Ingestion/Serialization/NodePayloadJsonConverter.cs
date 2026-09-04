@@ -119,6 +119,13 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
                     }
                     break;
 
+                case "src":
+                    if (reader.TokenType == JsonTokenType.Number && reader.TryGetUInt64(out var srcMac))
+                    {
+                        payload.SrcMac = srcMac;
+                    }
+                    break;
+
                 case "i":
                 case "imu":
                     payload.Imu = ReadDoubleArray(ref reader);
@@ -411,6 +418,11 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
         if (value.Rssi.HasValue)
         {
             writer.WriteNumber("rssi", value.Rssi.Value);
+        }
+
+        if (value.SrcMac.HasValue)
+        {
+            writer.WriteNumber("src", value.SrcMac.Value);
         }
 
         if (value.Imu is not null)

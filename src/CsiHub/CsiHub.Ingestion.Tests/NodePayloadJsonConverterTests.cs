@@ -112,6 +112,23 @@ public class NodePayloadJsonConverterTests
     }
 
     [Fact]
+    public void Can_Parse_Csi_Payload_With_Packed_Source_Mac()
+    {
+        const string json = """{"type":"csi","mac":"AA:BB:CC:DD:EE:FF","src":281474976710655,"seq":7,"rssi":-55,"t":12345,"c":[-10,20,-30,40,-50,60]}""";
+
+        var payload = JsonSerializer.Deserialize<NodePayload>(json);
+
+        Assert.NotNull(payload);
+        Assert.Equal("csi", payload.Type);
+        Assert.Equal("AA:BB:CC:DD:EE:FF", payload.Mac);
+        Assert.Equal(281474976710655UL, payload.SrcMac);
+        Assert.Equal(7, payload.Seq);
+        Assert.Equal(-55, payload.Rssi);
+        Assert.Equal(12345L, payload.Timestamp);
+        Assert.Equal(new[] { -10.0, 20.0, -30.0, 40.0, -50.0, 60.0 }, payload.Csi);
+    }
+
+    [Fact]
     public void Can_Parse_Config_Response()
     {
         const string json = """{"type":"config","mac":"00:11:22:33:44:55","state":"standby","baud":921600,"version":"0.1.0"}""";

@@ -113,6 +113,7 @@ public sealed class RfChannelEvaluator
 
         double bestMacScore = 0.0;
         double bestPps = 0.0;
+        double viablePpsSum = 0.0;
 
         foreach (var mac in channel.TopMacs.Values)
         {
@@ -121,6 +122,13 @@ public sealed class RfChannelEvaluator
             {
                 bestMacScore = stats.Score;
                 bestPps = stats.Pps;
+            }
+
+            // Reward channels that can feed the DSP pipeline from several
+            // strong transmitters at once.
+            if (stats.Pps >= MinimumPps && mac.RssiAvg >= -80.0)
+            {
+                viablePpsSum += stats.Pps;
             }
         }
 
@@ -135,7 +143,7 @@ public sealed class RfChannelEvaluator
         // after the dominant-transmitter criteria are met.
         double congestionBonus = Math.Sqrt(channel.Packets) / 100.0;
 
-        return bestMacScore + congestionBonus;
+        return bestMacScore + viablePpsSum + congestionBonus;
     }
 
     /// <summary>

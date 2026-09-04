@@ -16,8 +16,11 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
 {
     private readonly CsiIngestionChannel _channel;
     private readonly ILogger<CsiDspBackgroundService> _logger;
-    private readonly ConcurrentDictionary<string, RoomBaseline> _baselines = new();
-    private readonly ConcurrentDictionary<string, DateTimeOffset> _lastUpdateAt = new();
+    private readonly ConcurrentDictionary<(string NodeMac, ulong SrcMac), RoomBaseline> _baselines = new();
+    private readonly ConcurrentDictionary<(string NodeMac, ulong SrcMac), DateTimeOffset> _lastUpdateAt = new();
+    private readonly TimeSpan _pruneInterval = TimeSpan.FromSeconds(30);
+    private readonly TimeSpan _baselineMaxAge = TimeSpan.FromMinutes(10);
+    private DateTimeOffset _lastPrune = DateTimeOffset.UtcNow;
 
     private CancellationTokenSource? _cts;
     private Task? _task;
@@ -62,7 +65,7 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
     /// <summary>
     /// Snapshot of the current baselines for inspection or downstream fusion.
     /// </summary>
-    public IReadOnlyDictionary<string, RoomBaseline> Baselines => _baselines;
+    public IReadOnlyDictionary<(string NodeMac, ulong SrcMac), RoomBaseline> Baselines => _baselines;
 
     private async Task ProcessDspAsync(CancellationToken cancellationToken)
     {
@@ -75,11 +78,13 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
                     continue;
                 }
 
+                var key = (NodeMac: payload.Mac!, SrcMac: payload.SrcMac ?? 0UL);
+
                 if (payload.Bandwidth.HasValue)
                 {
                     var baseline = _baselines.GetOrAdd(
-                        payload.Mac,
-                        _ => new RoomBaseline { Mac = payload.Mac! });
+                        key,
+                        _ => new RoomBaseline { Mac = FormatMac(key.SrcMac) });
 
                     if (baseline.Bandwidth != payload.Bandwidth.Value)
                     {
@@ -90,8 +95,8 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
                 if (payload.Type == "csi" && payload.Csi is not null)
                 {
                     var csiBaseline = _baselines.GetOrAdd(
-                        payload.Mac,
-                        _ => new RoomBaseline { Mac = payload.Mac! });
+                        key,
+                        _ => new RoomBaseline { Mac = FormatMac(key.SrcMac) });
 
                     if (!csiBaseline.IsInitialized)
                     {
@@ -110,13 +115,19 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
                     }
 
                     TimeSpan? dt = null;
-                    if (_lastUpdateAt.TryGetValue(payload.Mac!, out var last))
+                    if (_lastUpdateAt.TryGetValue(key, out var last))
                     {
                         dt = payload.ReceivedAt - last;
                     }
 
                     csiBaseline.Update(payload.Csi, dt);
-                    _lastUpdateAt[payload.Mac!] = payload.ReceivedAt;
+                    _lastUpdateAt[key] = payload.ReceivedAt;
+                }
+
+                if (DateTimeOffset.UtcNow - _lastPrune > _pruneInterval)
+                {
+                    PruneOldBaselines(DateTimeOffset.UtcNow);
+                    _lastPrune = DateTimeOffset.UtcNow;
                 }
             }
         }
@@ -124,6 +135,24 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
         {
             // Expected on shutdown.
         }
+    }
+
+    private void PruneOldBaselines(DateTimeOffset now)
+    {
+        foreach (var key in _lastUpdateAt.Keys)
+        {
+            if (_lastUpdateAt.TryGetValue(key, out var last) &&
+                now - last > _baselineMaxAge &&
+                _baselines.TryRemove(key, out _))
+            {
+                _lastUpdateAt.TryRemove(key, out _);
+            }
+        }
+    }
+
+    private static string FormatMac(ulong mac)
+    {
+        return $"{(mac >> 40) & 0xFF:X2}:{(mac >> 32) & 0xFF:X2}:{(mac >> 24) & 0xFF:X2}:{(mac >> 16) & 0xFF:X2}:{(mac >> 8) & 0xFF:X2}:{mac & 0xFF:X2}";
     }
 
     public ValueTask DisposeAsync()

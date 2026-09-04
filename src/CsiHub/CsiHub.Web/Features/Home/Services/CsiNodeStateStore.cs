@@ -340,25 +340,36 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
 
     private void HandleErrorPayload(NodePayload payload)
     {
-        if (string.IsNullOrWhiteSpace(payload.Mac) || payload.Cmd != "set_features")
+        if (string.IsNullOrWhiteSpace(payload.Cmd))
         {
             return;
         }
 
-        var feature = GetFeatureKey(payload);
-        if (feature is null)
+        var mac = payload.Mac;
+        if (string.IsNullOrWhiteSpace(mac) && !string.IsNullOrWhiteSpace(payload.PortName))
+        {
+            mac = _nodes.Values
+                .FirstOrDefault(n =>
+                    string.Equals(n.PortName, payload.PortName, StringComparison.Ordinal) &&
+                    !string.IsNullOrWhiteSpace(n.Mac))?.Mac;
+        }
+
+        if (string.IsNullOrWhiteSpace(mac))
         {
             _logger.LogWarning(
-                "Received set_features error with unknown feature from {Mac}: reason={Reason}.",
-                payload.Mac,
-                payload.Reason);
+                "Received error payload from {Port}: cmd={Cmd}, reason={Reason}, param={Param}",
+                payload.PortName ?? "unknown",
+                payload.Cmd,
+                payload.Reason,
+                payload.Param);
             return;
         }
 
+        var feature = GetFeatureKey(payload) ?? payload.Cmd;
         var reason = payload.Reason ?? "unknown";
 
         _activeErrors.AddOrUpdate(
-            payload.Mac,
+            mac,
             _ => new ConcurrentDictionary<string, string>(new[] { new KeyValuePair<string, string>(feature, reason) }),
             (_, d) =>
             {
@@ -366,35 +377,38 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
                 return d;
             });
 
-        _unavailableFeatures.AddOrUpdate(
-            payload.Mac,
-            _ => new HashSet<string> { feature },
-            (_, s) =>
-            {
-                s.Add(feature);
-                return s;
-            });
+        if (payload.Cmd == "set_features")
+        {
+            _unavailableFeatures.AddOrUpdate(
+                mac,
+                _ => new HashSet<string> { feature },
+                (_, s) =>
+                {
+                    s.Add(feature);
+                    return s;
+                });
+        }
 
         _nodes.AddOrUpdate(
-            payload.Mac,
+            mac,
             _ => new NodeStateViewModel
             {
-                Key = payload.Mac,
+                Key = mac,
                 PortName = payload.PortName ?? string.Empty,
-                Mac = payload.Mac,
+                Mac = mac,
                 State = NodeConnectionState.Standby,
-                ActiveErrors = GetSnapshot(payload.Mac),
+                ActiveErrors = GetSnapshot(mac),
             },
             (_, existing) =>
             {
-                existing.ActiveErrors = GetSnapshot(payload.Mac);
+                existing.ActiveErrors = GetSnapshot(mac);
                 return existing;
             });
 
         _logger.LogWarning(
-            "Feature {Feature} failed for {Mac} on {Port}: {Reason}.",
+            "Command {Feature} failed for {Mac} on {Port}: {Reason}.",
             feature,
-            payload.Mac,
+            mac,
             payload.PortName ?? "unknown",
             reason);
     }
@@ -696,17 +710,26 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
     {
         if (!TryGetPortName(mac, out var portName) || string.IsNullOrWhiteSpace(portName))
         {
+            _logger.LogWarning("Cannot send set_rf to {Mac}: port not found.", mac);
             return false;
         }
 
         var json = JsonSerializer.Serialize(new { cmd = "set_rf", ch = channel, dwell_ms = dwellMs });
+        _logger.LogDebug("Queueing set_rf for {Mac} on {Port}: {Command}", mac, portName, json);
         return _portManager.TrySendCommand(portName, json);
     }
 
-    private bool TrySendSetRfPassive(string mac, int channel, int bw, string? targetMac)
+    private bool TrySendSetRfPassive(string mac, int channel, int bw, IReadOnlyCollection<string> targetMacs)
     {
         if (!TryGetPortName(mac, out var portName) || string.IsNullOrWhiteSpace(portName))
         {
+            _logger.LogWarning("Cannot send passive set_rf to {Mac}: port not found.", mac);
+            return false;
+        }
+
+        if (targetMacs.Count == 0)
+        {
+            _logger.LogWarning("TrySendSetRfPassive for {Mac} rejected: no target MACs.", mac);
             return false;
         }
 
@@ -716,9 +739,10 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
             ch = channel,
             bw,
             mode = "passive",
-            mac_filter = targetMac
+            mac_filter = targetMacs
         });
 
+        _logger.LogDebug("Queueing passive set_rf for {Mac} on {Port}: {Command}", mac, portName, json);
         return _portManager.TrySendCommand(portName, json);
     }
 
@@ -726,7 +750,7 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
     /// Broadcasts a passive sniffing configuration to all connected nodes, attempting
     /// to transition them into streaming mode simultaneously.
     /// </summary>
-    public Task BroadcastLockAndStreamAsync(int channel, int bw, string? targetMac, CancellationToken cancellationToken = default)
+    public Task BroadcastLockAndStreamAsync(int channel, int bw, IReadOnlyCollection<string> targetMacs, CancellationToken cancellationToken = default)
     {
         var macs = GetConnectedMacs();
         if (macs.Count == 0)
@@ -734,11 +758,17 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
             return Task.CompletedTask;
         }
 
+        if (targetMacs.Count == 0)
+        {
+            _logger.LogWarning("BroadcastLockAndStreamAsync rejected: no target MACs.");
+            return Task.CompletedTask;
+        }
+
         var tasks = new List<Task>(macs.Count);
         foreach (var mac in macs)
         {
             var captured = mac;
-            tasks.Add(Task.Run(() => TrySendSetRfPassive(captured, channel, bw, targetMac), cancellationToken));
+            tasks.Add(Task.Run(() => TrySendSetRfPassive(captured, channel, bw, targetMacs), cancellationToken));
         }
 
         return Task.WhenAll(tasks);

@@ -47,9 +47,15 @@ public:
     static void setChannel(uint8_t channel);
 
     /// <summary>
-    /// Starts passive sniffing on a channel with a target MAC filter.
+    /// Maximum number of target MAC addresses that can be tracked simultaneously.
     /// </summary>
-    static void startPassive(uint8_t channel, uint8_t bw, const char* macFilter);
+    static constexpr size_t MaxTargetMacs = 5;
+
+    /// <summary>
+    /// Starts passive sniffing on a channel with a target MAC filter.
+    /// macFilters is an array of up to MaxTargetMacs NUL-terminated MAC strings.
+    /// </summary>
+    static bool startPassive(uint8_t channel, uint8_t bw, const char* const* macFilters, size_t count);
 
     /// <summary>
     /// True while the channel sweep is still in progress.
@@ -91,9 +97,8 @@ private:
     static uint8_t _singleChannel;
     static uint8_t _passiveChannel;
     static uint8_t _passiveBw;
-    static String _passiveMacFilter;
-    static MacAddress _passiveTargetMac;
-    static bool _passiveTargetMacSet;
+    static std::array<MacAddress, MaxTargetMacs> _passiveTargetMacs;
+    static size_t _passiveTargetMacCount;
     static uint16_t _dwellMs;
     static uint8_t _channelIndex;
     static uint32_t _csiSeq;
@@ -110,8 +115,8 @@ private:
     static void addTopMacs(JsonDocument& doc);
     static String formatMac(const MacAddress& mac);
 
-    static bool parsePassiveTargetMac();
-    static bool matchesTargetMac(const uint8_t* mac);
+    static bool parseMacString(const char* s, MacAddress& out);
+    static bool matchesAnyTargetMac(const uint8_t* mac);
     static void handleCsi(wifi_csi_info_t* info);
     static void emitCsi(wifi_csi_info_t* info, const int8_t* csiBuf, uint16_t csiLen);
     static void prewarmCsiDoc();

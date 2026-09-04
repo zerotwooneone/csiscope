@@ -8,6 +8,7 @@
 @inject CsiNodeStateStore Store
 @inject CsiNodePortManager PortManager
 @inject CsiNodeConfigurationService ConfigService
+@inject CsiDspBackgroundService Dsp
 @inject IJSRuntime JS
 @implements IAsyncDisposable
 
@@ -245,18 +246,28 @@
                                 }
                             </select>
                         </div>
-                        <div class="col-md-4">
-                            <label class="form-label">Target MAC</label>
-                            <select class="form-select" @bind="_lockMac">
-                                <option value="">-- select MAC --</option>
+                        <div class="col-md-5">
+                            <label class="form-label">Target MACs</label>
+                            <div class="border rounded p-2" style="max-height: 10rem; overflow-y: auto;">
                                 @if (Store.CombinedRfScan.TryGetValue(_lockChannel, out var selectedChannel) && selectedChannel is not null)
                                 {
                                     @foreach (var mac in selectedChannel.TopMacs.Values.OrderByDescending(m => m.Packets).ThenByDescending(m => m.RssiAvg))
                                     {
-                                        <option value="@mac.Mac">@mac.Mac (@mac.Packets pkts, @mac.RssiAvg.ToString("F1") dBm)</option>
+                                        var macId = mac.Mac?.Replace(":", "-");
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" id="mac-@macId" checked="@_lockMacs.Contains(mac.Mac!)" @onchange="(e) => ToggleLockMac(mac.Mac, e)">
+                                            <label class="form-check-label" for="mac-@macId" style="font-size: 0.875rem;">@mac.Mac (@mac.Packets pkts, @mac.RssiAvg.ToString("F1") dBm)</label>
+                                        </div>
                                     }
                                 }
-                            </select>
+                                else
+                                {
+                                    <p class="text-muted mb-0">No MACs available for this channel.</p>
+                                }
+                            </div>
+                        </div>
+                        <div class="col-md-1 d-flex align-items-end">
+                            <button class="btn btn-outline-secondary w-100" type="button" @onclick="SelectTopMacs">Top 3</button>
                         </div>
                         <div class="col-md-2">
                             <label class="form-label">BW (MHz)</label>
@@ -275,6 +286,40 @@
     </div>
 }
 
+<h4 class="mt-4">Baseline Convergence</h4>
+@if (Dsp.Baselines.Count == 0)
+{
+    <p class="text-muted">No baselines have been established yet. Run Lock & Stream to start learning.</p>
+}
+else
+{
+    @foreach (var group in GetBaselineDiagnostics().GroupBy(d => d.SrcMac).OrderBy(g => g.Key))
+    {
+        <div class="card mb-3">
+            <div class="card-header">
+                Target: @FormatMac(group.Key)
+            </div>
+            <div class="card-body">
+                <div class="row text-center">
+                    @foreach (var diag in group.OrderBy(d => d.NodeMac))
+                    {
+                        <div class="col-md-4">
+                            <h6>@diag.NodeMac</h6>
+                            <div>@diag.FrameCount frames</div>
+                            <div>BW: @diag.Bandwidth MHz</div>
+                            <div>Mean I/Q: @diag.MeanIq.ToString("F2")</div>
+                            <div>Max Var: @diag.MaxVariance.ToString("F4")</div>
+                            <span class="badge @GetConvergenceClass(diag)">
+                                @(diag.IsConverged ? "Converged" : "Learning")
+                            </span>
+                        </div>
+                    }
+                </div>
+            </div>
+        </div>
+    }
+}
+
 @code {
     private PeriodicTimer? _timer;
     private string? _errorMessage;
@@ -282,8 +327,8 @@
     private bool _showAggregate;
     private int _manualChannel = 6;
     private int _lockChannel = 6;
-    private string? _lockMac;
     private int _lockBw = 20;
+    private List<string> _lockMacs = new();
     private int _sweepDwellMs = 250;
     private bool _accumulateSweep;
     private readonly ConcurrentDictionary<string, byte> _cooldownKeys = new();
@@ -507,27 +552,59 @@
             _lockChannel = Store.LatestRecommendation.Channel;
             _lockBw = 20;
             UpdateLockMac();
-            _lockMac = Store.LatestRecommendation.Mac ?? _lockMac;
+            var recommendation = Store.LatestRecommendation.Mac;
+            if (!string.IsNullOrWhiteSpace(recommendation) && !_lockMacs.Contains(recommendation))
+            {
+                _lockMacs.Add(recommendation);
+            }
         }
         else
         {
             _lockChannel = 6;
-            _lockMac = null;
+            _lockMacs.Clear();
         }
     }
 
     private void UpdateLockMac()
     {
-        if (Store.CombinedRfScan.TryGetValue(_lockChannel, out var selectedChannel) && selectedChannel.TopMacs.Count > 0)
+        SelectTopMacs();
+    }
+
+    private void ToggleLockMac(string? mac, ChangeEventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(mac))
         {
-            _lockMac = selectedChannel.TopMacs.Values
-                .OrderByDescending(m => m.Packets)
-                .ThenByDescending(m => m.RssiAvg)
-                .FirstOrDefault()?.Mac;
+            return;
+        }
+
+        if (e.Value is true)
+        {
+            if (!_lockMacs.Contains(mac))
+            {
+                _lockMacs.Add(mac);
+            }
         }
         else
         {
-            _lockMac = null;
+            _lockMacs.Remove(mac);
+        }
+    }
+
+    private void SelectTopMacs()
+    {
+        if (Store.CombinedRfScan.TryGetValue(_lockChannel, out var selectedChannel) && selectedChannel is not null)
+        {
+            _lockMacs = selectedChannel.TopMacs.Values
+                .OrderByDescending(m => m.Packets)
+                .ThenByDescending(m => m.RssiAvg)
+                .Take(3)
+                .Select(m => m.Mac)
+                .Where(m => !string.IsNullOrWhiteSpace(m))
+                .ToList()!;
+        }
+        else
+        {
+            _lockMacs.Clear();
         }
     }
 
@@ -539,15 +616,15 @@
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(_lockMac))
+        if (_lockMacs.Count == 0)
         {
-            _errorMessage = "Select a target MAC.";
+            _errorMessage = "Select at least one target MAC.";
             return;
         }
 
         try
         {
-            await Store.BroadcastLockAndStreamAsync(_lockChannel, _lockBw, _lockMac).ConfigureAwait(false);
+            await Store.BroadcastLockAndStreamAsync(_lockChannel, _lockBw, _lockMacs).ConfigureAwait(false);
             _showAggregate = false;
             _errorMessage = null;
         }
@@ -675,6 +752,68 @@
         _errorMessage = null;
         await Store.RetryFeatureAsync(node, feature).ConfigureAwait(false);
     }
+
+    private static string GetConvergenceClass(BaselineDiagnostic diag)
+    {
+        return diag.IsConverged ? "bg-success" : "bg-warning text-dark";
+    }
+
+    private static string FormatMac(ulong mac)
+    {
+        return $"{(mac >> 40) & 0xFF:X2}:{(mac >> 32) & 0xFF:X2}:{(mac >> 24) & 0xFF:X2}:{(mac >> 16) & 0xFF:X2}:{(mac >> 8) & 0xFF:X2}:{mac & 0xFF:X2}";
+    }
+
+    private IReadOnlyList<BaselineDiagnostic> GetBaselineDiagnostics()
+    {
+        var list = new List<BaselineDiagnostic>(Dsp.Baselines.Count);
+
+        foreach (var (key, baseline) in Dsp.Baselines)
+        {
+            if (!baseline.IsInitialized)
+            {
+                continue;
+            }
+
+            var mean = baseline.Mean;
+            var variance = baseline.Variance;
+
+            double meanIq = 0.0;
+            double maxVariance = 0.0;
+            for (int i = 0; i < mean.Length; i++)
+            {
+                meanIq += mean[i];
+                if (variance[i] > maxVariance)
+                {
+                    maxVariance = variance[i];
+                }
+            }
+
+            if (mean.Length > 0)
+            {
+                meanIq /= mean.Length;
+            }
+
+            list.Add(new BaselineDiagnostic(
+                key.NodeMac,
+                key.SrcMac,
+                baseline.TotalFrames,
+                baseline.Bandwidth,
+                meanIq,
+                maxVariance,
+                baseline.IsConverged));
+        }
+
+        return list;
+    }
+
+    private sealed record BaselineDiagnostic(
+        string NodeMac,
+        ulong SrcMac,
+        long FrameCount,
+        int Bandwidth,
+        double MeanIq,
+        double MaxVariance,
+        bool IsConverged);
 
     public ValueTask DisposeAsync()
     {

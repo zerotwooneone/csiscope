@@ -12,6 +12,11 @@
 extern SystemState currentState;
 extern String nodeMacAddress;
 
+// Command parsing uses the default ArduinoJson heap allocator.
+// The fixed-size bump allocator was removed because ArduinoJson v7's elastic
+// JsonDocument re-allocates its internal pool and leaves unreachable holes in a
+// simple bump buffer, which caused NoMemory for even tiny commands.
+
 char SerialManager::rxBuffer[RX_BUFFER_SIZE];
 size_t SerialManager::head = 0;
 size_t SerialManager::tail = 0;
@@ -150,8 +155,7 @@ bool SerialManager::tryReadLine(char* line, size_t maxLen)
 
 void SerialManager::parseAndDispatch(const char* line)
 {
-    static JsonDocument doc;
-    doc.clear();
+    JsonDocument doc;
     DeserializationError err = deserializeJson(doc, line);
     if (err)
     {
@@ -211,14 +215,38 @@ void SerialManager::parseAndDispatch(const char* line)
         if (strcmp(mode, "passive") == 0)
         {
             int bw = doc["bw"] | 20;
-            const char* macFilter = doc["mac_filter"];
-            if (macFilter == nullptr || strlen(macFilter) == 0)
+
+            JsonArrayConst macFilters = doc["mac_filter"].as<JsonArrayConst>();
+            if (macFilters.isNull() || macFilters.size() == 0)
             {
                 sendError("set_rf", "missing_mac_filter");
                 return;
             }
+            if (macFilters.size() > RfManager::MaxTargetMacs)
+            {
+                sendError("set_rf", "too_many_mac_filters");
+                return;
+            }
 
-            RfManager::startPassive(static_cast<uint8_t>(ch), static_cast<uint8_t>(bw), macFilter);
+            const char* macStrings[RfManager::MaxTargetMacs];
+            size_t macCount = 0;
+            for (size_t i = 0; i < macFilters.size(); ++i)
+            {
+                const char* s = macFilters[i].as<const char*>();
+                if (s == nullptr || *s == '\0')
+                {
+                    sendError("set_rf", "invalid_mac_filter");
+                    return;
+                }
+                macStrings[macCount++] = s;
+            }
+
+            if (!RfManager::startPassive(static_cast<uint8_t>(ch), static_cast<uint8_t>(bw), macStrings, macCount))
+            {
+                sendError("set_rf", "invalid_mac_filter");
+                return;
+            }
+
             currentState = SystemState::STATE_STREAMING;
             HardwareDiagnostics::setLedState(currentState);
             sendAck("set_rf", true);

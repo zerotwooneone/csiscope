@@ -244,28 +244,19 @@ public sealed class SerialPipelineReader
 
                 try
                 {
-                    await port.BaseStream.WriteAsync(command.AsMemory(), cancellationToken).ConfigureAwait(false);
-                    await port.BaseStream.WriteAsync(NewLineBytes.AsMemory(), cancellationToken).ConfigureAwait(false);
-                    await port.BaseStream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                    _logger.LogDebug("Serial write to {Port}: {Command}", _portName, json);
+
+                    await port.BaseStream.WriteAsync(command, 0, command.Length, cancellationToken).ConfigureAwait(false);
+                    await port.BaseStream.WriteAsync(NewLineBytes, 0, NewLineBytes.Length, cancellationToken).ConfigureAwait(false);
                 }
-                catch (IOException) when (cancellationToken.IsCancellationRequested)
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
                     // Port was closed to unblock the reader during shutdown.
                     return;
                 }
-                catch (ObjectDisposedException) when (cancellationToken.IsCancellationRequested)
-                {
-                    // Port was closed to unblock the reader during shutdown.
-                    return;
-                }
-                catch (IOException ex)
+                catch (Exception ex)
                 {
                     _logger.LogWarning(ex, "Serial write to {Port} failed; port may have been closed.", _portName);
-                    return;
-                }
-                catch (ObjectDisposedException ex)
-                {
-                    _logger.LogDebug(ex, "Serial write to {Port} aborted because the port was closed.", _portName);
                     return;
                 }
             }
@@ -306,10 +297,44 @@ public sealed class SerialPipelineReader
         return true;
     }
 
+    private static bool TryFindFirstNonWhitespace(ReadOnlySequence<byte> line, out byte value)
+    {
+        value = 0;
+
+        foreach (var segment in line)
+        {
+            ReadOnlySpan<byte> span = segment.Span;
+            for (int i = 0; i < span.Length; i++)
+            {
+                byte b = span[i];
+                if (b != (byte)' ' && b != (byte)'\t' && b != (byte)'\r' && b != (byte)'\n')
+                {
+                    value = b;
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     private void ProcessLine(ReadOnlySequence<byte> line)
     {
         if (line.Length == 0)
         {
+            return;
+        }
+
+        if (!TryFindFirstNonWhitespace(line, out byte first) || first != (byte)'{')
+        {
+            int previewLength = (int)Math.Min(line.Length, 200);
+            var preview = line.Slice(0, previewLength).ToArray();
+            var lineText = Encoding.UTF8.GetString(preview);
+
+            _logger.LogWarning(
+                "Ignoring non-JSON-object NDJSON line from {Port}: {Line}",
+                _portName,
+                lineText);
             return;
         }
 
@@ -333,9 +358,30 @@ public sealed class SerialPipelineReader
                 }
             }
         }
+        catch (JsonException ex)
+        {
+            long position = ex.BytePositionInLine ?? 0;
+            int windowStart = (int)Math.Max(0, position - 100);
+            int windowLength = (int)Math.Min(line.Length - windowStart, 200);
+            if (windowLength <= 0)
+            {
+                windowStart = 0;
+                windowLength = (int)Math.Min(line.Length, 200);
+            }
+
+            var window = line.Slice(windowStart, windowLength).ToArray();
+            var windowText = Encoding.UTF8.GetString(window);
+
+            _logger.LogWarning(ex,
+                "Failed to parse NDJSON line from {Port} at position {Position} (length {Length}): {Window}",
+                _portName,
+                position,
+                line.Length,
+                windowText);
+        }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to parse NDJSON line from {Port}.", _portName);
+            _logger.LogDebug(ex, "Failed to process NDJSON line from {Port}.", _portName);
         }
     }
 

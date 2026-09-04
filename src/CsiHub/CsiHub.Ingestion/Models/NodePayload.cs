@@ -47,6 +47,11 @@ public sealed class NodePayload
     /// </summary>
     public int? Rssi { get; set; }
 
+    /// <summary>
+    /// Packed source/transmitter MAC address (48 bits stored in a ulong).
+    /// </summary>
+    public ulong? SrcMac { get; set; }
+
     public double[]? Imu { get; set; }
 
     /// <summary>

@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "../.."
+		},
+		{
+			"name": "csinode",
+			"path": "csinode"
+		}
+	],
+	"settings": {}
+}
