@@ -8,12 +8,17 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
 
+builder.Configuration.AddJsonFile("array_geometry.json", optional: true, reloadOnChange: true);
+
 builder.Services.AddCsiIngestion(builder.Configuration.GetSection("CsiIngestion"));
+builder.Services.Configure<CsiAoaOptions>(builder.Configuration.GetSection("CsiAoaOptions"));
+builder.Services.Configure<ArrayGeometryOptions>(builder.Configuration.GetSection("ArrayGeometry"));
 
 builder.Services.AddSingleton<CsiNodeConfigurationService>();
 builder.Services.AddSingleton<RfChannelEvaluator>();
 builder.Services.AddSingleton<CsiNodeStateStore>();
 builder.Services.AddSingleton<IHostedService>(provider => provider.GetRequiredService<CsiNodeStateStore>());
+builder.Services.AddSingleton<HardwareConfigService>();
 
 var app = builder.Build();
 

@@ -19,6 +19,7 @@ public static class CsiIngestionServiceCollectionExtensions
     public static IServiceCollection AddCsiIngestion(this IServiceCollection services)
     {
         services.AddOptions<CsiIngestionOptions>();
+        services.AddOptions<CsiAoaOptions>();
         services.AddSingleton<CsiIngestionChannel>();
         services.AddSingleton<ISerialPortFactory, SerialPortAdapterFactory>();
         services.AddSingleton<CsiNodePortManager>();

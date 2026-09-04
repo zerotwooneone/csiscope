@@ -1,0 +1,40 @@
+{
+  "ArrayGeometry": {
+    "OriginMac": "E8:F6:0A:A3:6E:84",
+    "XArmMac": "14:C1:9F:2E:53:D0",
+    "YArmMac": "E8:F6:0A:A3:6E:A0",
+    "XArmSpacingMeters": 0.0625,
+    "YArmSpacingMeters": 0.0625,
+    "SampleMaxAge": "00:00:02",
+    "CarrierFrequencyHz": 2400000000,
+    "SpeedOfLight": 300000000,
+    "StepDegrees": 1,
+    "SubcarrierIndex": 0,
+    "SourceCount": 1
+  },
+  "CsiAoaOptions": {
+    "SensorPositions": {
+      "E8:F6:0A:A3:6E:84": {
+        "X": 0,
+        "Y": 0,
+        "Z": 0
+      },
+      "14:C1:9F:2E:53:D0": {
+        "X": 0.0625,
+        "Y": 0,
+        "Z": 0
+      },
+      "E8:F6:0A:A3:6E:A0": {
+        "X": 0,
+        "Y": 0.0625,
+        "Z": 0
+      }
+    },
+    "CarrierFrequencyHz": 2400000000,
+    "SpeedOfLight": 300000000,
+    "SourceCount": 1,
+    "StepDegrees": 1,
+    "SubcarrierIndex": 0,
+    "SampleMaxAge": "00:00:02"
+  }
+}

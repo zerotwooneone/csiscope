@@ -9,6 +9,7 @@
 @inject CsiNodePortManager PortManager
 @inject CsiNodeConfigurationService ConfigService
 @inject CsiDspBackgroundService Dsp
+@inject HardwareConfigService Config
 @inject IJSRuntime JS
 @implements IAsyncDisposable
 
@@ -41,6 +42,8 @@
         @(Store.IsDistributedSweepActive ? "Distributed RF Sweep Running..." : "Run Distributed RF Sweep")
     </button>
     <button class="btn btn-outline-primary" type="button" @onclick="ShowAggregateModal">View Aggregate RF Scan</button>
+    <button class="btn btn-outline-secondary" type="button" @onclick="SendSyncTestToAll">Test Sync</button>
+    <button class="btn btn-outline-secondary" type="button" @onclick="SendRfTestToAll">Test RF</button>
     @if (Store.IsDistributedSweepActive)
     {
         <button class="btn btn-outline-danger" type="button" @onclick="Store.StopDistributedSweep">Cancel Sweep</button>
@@ -286,6 +289,80 @@
     </div>
 }
 
+<h4 class="mt-4">Array Geometry</h4>
+<div class="card mb-3">
+    <div class="card-header">Node Geometry Configuration</div>
+    <div class="card-body">
+        <div class="row g-3">
+            <div class="col-md-3">
+                <label class="form-label">Origin</label>
+                <select class="form-select" @bind="_geometry.OriginMac">
+                    <option value="">-- select --</option>
+                    @foreach (var mac in GetConnectedMacs())
+                    {
+                        <option value="@mac">@mac</option>
+                    }
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label">X-Axis</label>
+                <select class="form-select" @bind="_geometry.XArmMac">
+                    <option value="">-- select --</option>
+                    @foreach (var mac in GetConnectedMacs())
+                    {
+                        <option value="@mac">@mac</option>
+                    }
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label">Y-Axis</label>
+                <select class="form-select" @bind="_geometry.YArmMac">
+                    <option value="">-- select --</option>
+                    @foreach (var mac in GetConnectedMacs())
+                    {
+                        <option value="@mac">@mac</option>
+                    }
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">X spacing (m)</label>
+                <input type="number" step="0.001" class="form-control" @bind="_geometry.XArmSpacingMeters" />
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">Y spacing (m)</label>
+                <input type="number" step="0.001" class="form-control" @bind="_geometry.YArmSpacingMeters" />
+            </div>
+        </div>
+        <button class="btn btn-primary mt-3" @onclick="SaveGeometryAsync" disabled="@_geometrySaving">
+            @(_geometrySaving ? "Saving..." : "Save Geometry")
+        </button>
+    </div>
+</div>
+
+<div class="card mb-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span>Target AoA Canvas</span>
+        <span class="badge bg-secondary" title="AoA pipeline status">@Dsp.LastAoaStatus</span>
+    </div>
+    <div class="card-body text-center" style="color: var(--bs-body-color)">
+        <svg width="360" height="360" viewBox="0 0 360 360">
+            <circle cx="180" cy="180" r="150" fill="none" stroke="currentColor" stroke-width="1" />
+            <circle cx="180" cy="180" r="100" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="4 2" />
+            <circle cx="180" cy="180" r="50" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="2 2" />
+            <line x1="180" y1="30" x2="180" y2="330" stroke="currentColor" stroke-width="1" />
+            <line x1="30" y1="180" x2="330" y2="180" stroke="currentColor" stroke-width="1" />
+            <circle cx="180" cy="180" r="4" fill="currentColor" />
+            @foreach (var t in GetTargetPlacements())
+            {
+                <line x1="180" y1="180" x2="@t.X" y2="@t.Y" stroke="@t.Color" stroke-width="2" />
+                <circle cx="@t.X" cy="@t.Y" r="@t.Radius" fill="@t.Color" fill-opacity="0.7">
+                    <title>@t.Mac</title>
+                </circle>
+            }
+        </svg>
+    </div>
+</div>
+
 <h4 class="mt-4">Baseline Convergence</h4>
 @if (Dsp.Baselines.Count == 0)
 {
@@ -309,20 +386,23 @@ else
                 <div class="row text-center">
                     @foreach (var diag in group.OrderByDescending(d => d.FrameCount))
                     {
-                        <div class="col-md-4">
+                        <div class="col-md-4" style="opacity: @GetOpacity(diag).ToString("F2", System.Globalization.CultureInfo.InvariantCulture)">
                             <h6>@diag.NodeMac</h6>
                             <div>@diag.FrameCount frames</div>
                             <div>Δ @diag.FrameDelta / @diag.DropRate.ToString("P1") drop</div>
                             <div>BW: @diag.Bandwidth MHz</div>
                             <div>Mean I/Q: @diag.MeanIq.ToString("F2")</div>
-                            <div>Max Var: @diag.MaxVariance.ToString("F4")</div>
-                            <span class="badge @GetConvergenceClass(diag)">
-                                @(diag.IsConverged ? "Converged" : "Learning")
-                            </span>
-                            @if (diag.DropRate >= 0.10)
-                            {
-                                <span class="badge bg-danger ms-1">Sync loss</span>
-                            }
+                            <div>P95 Var: @diag.PercentileVariance.ToString("F4")</div>
+                            <div class="small text-muted">Last seen @GetLastSeenText(diag)</div>
+                            <div>
+                                <span class="badge @GetConvergenceClass(diag)">
+                                    @(diag.IsConverged ? "Converged" : "Learning")
+                                </span>
+                                @if (diag.DropRate >= 0.10)
+                                {
+                                    <span class="badge bg-danger ms-1">Sync loss</span>
+                                }
+                            </div>
                         </div>
                     }
                 </div>
@@ -344,6 +424,8 @@ else
     private bool _accumulateSweep;
     private readonly ConcurrentDictionary<string, byte> _cooldownKeys = new();
     private readonly ConcurrentDictionary<string, NodeConfiguration> _localConfigurations = new();
+    private ArrayGeometryOptions _geometry = new();
+    private bool _geometrySaving;
 
     private int LockChannel
     {
@@ -377,6 +459,8 @@ else
         {
             _timer = new PeriodicTimer(TimeSpan.FromMilliseconds(333));
             _ = UpdateLoop();
+            _geometry = await Config.LoadAsync();
+            StateHasChanged();
         }
 
         await JS.InvokeVoidAsync("initTooltips");
@@ -538,6 +622,36 @@ else
     private Task SendRfScan(NodeStateViewModel node)
     {
         return SendCommandAsync(node, "diag_test", "rf");
+    }
+
+    private Task SendSyncTestToAll() => SendDiagTestToAll("sync");
+
+    private Task SendRfTestToAll() => SendDiagTestToAll("rf");
+
+    private async Task SendDiagTestToAll(string type)
+    {
+        var failed = new List<string>();
+        var json = $"{{\"cmd\":\"diag_test\",\"type\":\"{type}\"}}";
+
+        foreach (var mac in Store.GetConnectedMacs())
+        {
+            if (!Store.TryGetPortName(mac, out var portName) || string.IsNullOrWhiteSpace(portName))
+            {
+                failed.Add(mac);
+                continue;
+            }
+
+            if (!PortManager.TrySendCommand(portName, json))
+            {
+                failed.Add(portName);
+            }
+        }
+
+        _errorMessage = failed.Count > 0
+            ? $"Failed to send {type} diag_test to {string.Join(", ", failed)}"
+            : null;
+
+        await InvokeAsync(StateHasChanged).ConfigureAwait(false);
     }
 
     private void OpenRfModal(NodeStateViewModel node)
@@ -780,6 +894,31 @@ else
         };
     }
 
+    private static double GetOpacity(BaselineDiagnostic diag)
+    {
+        const double FadeSeconds = 30.0;
+        const double MinOpacity = 0.2;
+
+        if (!diag.LastSeen.HasValue)
+        {
+            return MinOpacity;
+        }
+
+        var seconds = (DateTimeOffset.UtcNow - diag.LastSeen.Value).TotalSeconds;
+        return Math.Clamp(1.0 - seconds / FadeSeconds, MinOpacity, 1.0);
+    }
+
+    private static string GetLastSeenText(BaselineDiagnostic diag)
+    {
+        if (!diag.LastSeen.HasValue)
+        {
+            return "unknown";
+        }
+
+        var seconds = (DateTimeOffset.UtcNow - diag.LastSeen.Value).TotalSeconds;
+        return $"{seconds:F0}s ago";
+    }
+
     private static string FormatMac(ulong mac)
     {
         return $"{(mac >> 40) & 0xFF:X2}:{(mac >> 32) & 0xFF:X2}:{(mac >> 24) & 0xFF:X2}:{(mac >> 16) & 0xFF:X2}:{(mac >> 8) & 0xFF:X2}:{mac & 0xFF:X2}";
@@ -796,35 +935,17 @@ else
                 continue;
             }
 
-            var mean = baseline.Mean;
-            var variance = baseline.Variance;
-
-            double meanIq = 0.0;
-            double maxVariance = 0.0;
-            for (int i = 0; i < mean.Length; i++)
-            {
-                meanIq += mean[i];
-                if (variance[i] > maxVariance)
-                {
-                    maxVariance = variance[i];
-                }
-            }
-
-            if (mean.Length > 0)
-            {
-                meanIq /= mean.Length;
-            }
-
             list.Add(new BaselineDiagnostic(
                 key.NodeMac,
                 key.SrcMac,
                 baseline.TotalFrames,
                 baseline.Bandwidth,
-                meanIq,
-                maxVariance,
+                baseline.MeanIq,
+                baseline.PercentileVariance,
                 baseline.IsConverged,
                 0,
-                0.0));
+                0.0,
+                baseline.LastSeen));
         }
 
         var enriched = new List<BaselineDiagnostic>(list.Count);
@@ -851,10 +972,65 @@ else
         long FrameCount,
         int Bandwidth,
         double MeanIq,
-        double MaxVariance,
+        double PercentileVariance,
         bool IsConverged,
         long FrameDelta = 0,
-        double DropRate = 0.0);
+        double DropRate = 0.0,
+        DateTimeOffset? LastSeen = null);
+
+    private IEnumerable<string> GetConnectedMacs()
+    {
+        return Store.GetConnectedMacs().OrderBy(m => m, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private async Task SaveGeometryAsync()
+    {
+        _geometrySaving = true;
+        try
+        {
+            await Config.SaveAsync(_geometry).ConfigureAwait(false);
+        }
+        finally
+        {
+            _geometrySaving = false;
+            await InvokeAsync(StateHasChanged).ConfigureAwait(false);
+        }
+    }
+
+    private IEnumerable<TargetPlacement> GetTargetPlacements()
+    {
+        // MUSIC/EVD returns only an angle. Passive Wi-Fi has no ToF, so
+        // the target is always placed on a fixed outer ring to show direction.
+        const double Center = 180.0;
+        const double TrackRadius = 150.0;
+
+        foreach (var group in GetBaselineDiagnostics()
+            .GroupBy(d => d.SrcMac)
+            .Where(g => g.Sum(d => d.FrameCount) >= 50))
+        {
+            if (!Dsp.AoaResults.TryGetValue(group.Key, out var aoa) || !aoa.PeakAngleDegrees.HasValue)
+            {
+                continue;
+            }
+
+            double angleRad = aoa.PeakAngleDegrees.Value * Math.PI / 180.0;
+            double x = Center + TrackRadius * Math.Sin(angleRad);
+            double y = Center - TrackRadius * Math.Cos(angleRad);
+
+            double p95Variance = group.Max(d => d.PercentileVariance);
+            double dotRadius = Math.Clamp(Math.Sqrt(p95Variance) * 60.0, 4.0, 20.0);
+            string color = FormatMac(group.Key).ToMacColor();
+
+            yield return new TargetPlacement(
+                FormatMac(group.Key),
+                x.ToString("F1", System.Globalization.CultureInfo.InvariantCulture),
+                y.ToString("F1", System.Globalization.CultureInfo.InvariantCulture),
+                dotRadius.ToString("F1", System.Globalization.CultureInfo.InvariantCulture),
+                color);
+        }
+    }
+
+    private sealed record TargetPlacement(string Mac, string X, string Y, string Radius, string Color);
 
     public ValueTask DisposeAsync()
     {

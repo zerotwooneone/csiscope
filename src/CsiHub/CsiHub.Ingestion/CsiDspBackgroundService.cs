@@ -1,9 +1,14 @@
+using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
+using System.Numerics;
 using CsiHub.Core;
 using CsiHub.Ingestion.Channels;
 using CsiHub.Ingestion.Models;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace CsiHub.Ingestion;
 
@@ -16,8 +21,11 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
 {
     private readonly CsiIngestionChannel _channel;
     private readonly ILogger<CsiDspBackgroundService> _logger;
+    private readonly IOptionsMonitor<CsiAoaOptions> _aoaOptions;
     private readonly ConcurrentDictionary<(string NodeMac, ulong SrcMac), RoomBaseline> _baselines = new();
     private readonly ConcurrentDictionary<(string NodeMac, ulong SrcMac), DateTimeOffset> _lastUpdateAt = new();
+    private readonly ConcurrentDictionary<(string NodeMac, ulong SrcMac), (Complex Sample, DateTimeOffset At)> _latestSamples = new();
+    private readonly ConcurrentDictionary<ulong, AoaEstimator.AoaResult> _aoaResults = new();
     private readonly TimeSpan _pruneInterval = TimeSpan.FromSeconds(30);
     private readonly TimeSpan _baselineMaxAge = TimeSpan.FromMinutes(10);
     private DateTimeOffset _lastPrune = DateTimeOffset.UtcNow;
@@ -25,10 +33,14 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
     private CancellationTokenSource? _cts;
     private Task? _task;
 
-    public CsiDspBackgroundService(CsiIngestionChannel channel, ILogger<CsiDspBackgroundService> logger)
+    public CsiDspBackgroundService(
+        CsiIngestionChannel channel,
+        ILogger<CsiDspBackgroundService> logger,
+        IOptionsMonitor<CsiAoaOptions> aoaOptions)
     {
         _channel = channel;
         _logger = logger;
+        _aoaOptions = aoaOptions;
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
@@ -67,6 +79,17 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
     /// </summary>
     public IReadOnlyDictionary<(string NodeMac, ulong SrcMac), RoomBaseline> Baselines => _baselines;
 
+    /// <summary>
+    /// Per-target AoA estimates computed from the latest per-node CSI snapshots.
+    /// </summary>
+    public IReadOnlyDictionary<ulong, AoaEstimator.AoaResult> AoaResults => _aoaResults;
+
+    /// <summary>
+    /// Last status message from the AoA update pipeline, useful for diagnosing
+    /// why the MUSIC estimator did not run for a target.
+    /// </summary>
+    public string LastAoaStatus { get; private set; } = "No AoA data yet";
+
     private async Task ProcessDspAsync(CancellationToken cancellationToken)
     {
         try
@@ -82,6 +105,7 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
 
                 if (payload.Type == "csi" && payload.Csi is not null)
                 {
+                    var aoaOptions = _aoaOptions.CurrentValue;
                     var csiBaseline = _baselines.GetOrAdd(
                         key,
                         _ => new RoomBaseline { Mac = FormatMac(key.SrcMac) });
@@ -97,16 +121,14 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
                             csiBaseline.InitializeFromLength(payload.Csi.Length, RoomBaseline.DefaultWindowSize);
                         }
                     }
-                    else if (payload.Bandwidth.HasValue &&
-                             (csiBaseline.Bandwidth != payload.Bandwidth.Value ||
-                              csiBaseline.SubcarrierCount * 2 != payload.Csi.Length))
+                    else if (payload.Bandwidth.HasValue && csiBaseline.Bandwidth != payload.Bandwidth.Value)
                     {
+                        // Only reinitialize on a true bandwidth change. Minor null-subcarrier
+                        // stripping is handled by padding/truncating in RoomBaseline.Update.
                         csiBaseline.Initialize(payload.Bandwidth.Value, RoomBaseline.DefaultWindowSize, payload.Csi.Length);
                     }
-                    else if (csiBaseline.SubcarrierCount * 2 != payload.Csi.Length)
-                    {
-                        csiBaseline.InitializeFromLength(payload.Csi.Length, RoomBaseline.DefaultWindowSize);
-                    }
+
+                    csiBaseline.ConvergenceVarianceMultiplier = aoaOptions.ConvergenceVarianceMultiplier;
 
                     TimeSpan? dt = null;
                     if (_lastUpdateAt.TryGetValue(key, out var last))
@@ -115,7 +137,11 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
                     }
 
                     csiBaseline.Update(payload.Csi, dt, RoomBaseline.CsiInputScale);
+                    csiBaseline.LastSeen = payload.ReceivedAt;
                     _lastUpdateAt[key] = payload.ReceivedAt;
+
+                    _latestSamples[key] = (GetSubcarrierSample(payload.Csi, aoaOptions.SubcarrierIndex), payload.ReceivedAt);
+                    TryUpdateAoa(key.SrcMac, payload.ReceivedAt, aoaOptions);
                 }
 
                 if (DateTimeOffset.UtcNow - _lastPrune > _pruneInterval)
@@ -129,6 +155,76 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
         {
             // Expected on shutdown.
         }
+    }
+
+    private void TryUpdateAoa(ulong srcMac, DateTimeOffset now, CsiAoaOptions aoaOptions)
+    {
+        if (aoaOptions.SensorPositions.Count == 0)
+        {
+            LastAoaStatus = "No geometry configured";
+            return;
+        }
+
+        var sensors = new List<AoaEstimator.SensorPosition>(aoaOptions.SensorPositions.Count);
+        var samples = new List<Complex>(aoaOptions.SensorPositions.Count);
+
+        foreach (var (nodeMac, position) in aoaOptions.SensorPositions)
+        {
+            if (!_latestSamples.TryGetValue((nodeMac, srcMac), out var entry))
+            {
+                LastAoaStatus = $"Waiting for node {nodeMac}";
+                return;
+            }
+
+            if (now - entry.At > aoaOptions.SampleMaxAge)
+            {
+                LastAoaStatus = $"Stale sample from {nodeMac} ({(now - entry.At).TotalSeconds:F1}s old)";
+                return;
+            }
+
+            sensors.Add(position);
+            samples.Add(entry.Sample);
+        }
+
+        if (sensors.Count < aoaOptions.SourceCount + 1)
+        {
+            LastAoaStatus = $"Need {aoaOptions.SourceCount + 1} sensors, have {sensors.Count}";
+            return;
+        }
+
+        double wavelength = aoaOptions.SpeedOfLight / aoaOptions.CarrierFrequencyHz;
+        var snapshots = new[] { samples.ToArray() };
+
+        var result = AoaEstimator.Estimate(
+            sensors,
+            snapshots,
+            wavelength,
+            aoaOptions.SourceCount,
+            aoaOptions.StepDegrees);
+
+        if (result is null)
+        {
+            LastAoaStatus = "Estimator returned null";
+            return;
+        }
+
+        _aoaResults[srcMac] = result;
+        LastAoaStatus = $"Updated AoA for {FormatMac(srcMac)}";
+    }
+
+    private Complex GetSubcarrierSample(double[]? csi, int subcarrierIndex)
+    {
+        if (csi is null || csi.Length < 2)
+        {
+            return Complex.Zero;
+        }
+
+        int subcarrierCount = csi.Length / 2;
+        int index = Math.Clamp(subcarrierIndex, 0, subcarrierCount - 1);
+
+        double real = csi[index * 2];
+        double imag = csi[(index * 2) + 1];
+        return new Complex(real, imag);
     }
 
     private void PruneOldBaselines(DateTimeOffset now)

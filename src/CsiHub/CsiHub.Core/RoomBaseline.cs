@@ -20,12 +20,10 @@ public sealed class RoomBaseline
     /// </summary>
     public const double CsiInputScale = 1.0 / 128.0;
 
-    /// <summary>
-    /// Convergence threshold for the 95th-percentile slot variance when inputs are scaled by
-    /// <see cref="CsiInputScale"/>. A value of 0.01 corresponds to a raw variance of ~163,
-    /// which is low compared to the full-scale raw variance of ~4000.
-    /// </summary>
-    public const double ConvergenceVarianceThreshold = 0.01;
+    private double _convergenceVarianceMultiplier = 1.5;
+    private double _varianceFloor;
+    private double _convergenceThreshold;
+    private bool _convergenceThresholdLocked;
 
     private readonly double _emaAlpha;
     private readonly double _sampleRateHz;
@@ -87,9 +85,30 @@ public sealed class RoomBaseline
     public bool IsInitialized => _slotCount > 0;
 
     /// <summary>
+    /// Multiplier applied to the 95th-percentile variance floor to determine convergence.
+    /// </summary>
+    public double ConvergenceVarianceMultiplier
+    {
+        get => _convergenceVarianceMultiplier;
+        set
+        {
+            _convergenceVarianceMultiplier = value > 0.0 ? value : 1.5;
+            if (_convergenceThresholdLocked)
+            {
+                _convergenceThreshold = _convergenceVarianceMultiplier * _varianceFloor;
+            }
+        }
+    }
+
+    /// <summary>
     /// Total number of CSI frames added to the baseline.
     /// </summary>
     public long TotalFrames => _totalFrames;
+
+    /// <summary>
+    /// Host-local time the baseline was last updated with a CSI frame.
+    /// </summary>
+    public DateTimeOffset? LastSeen { get; set; }
 
     /// <summary>
     /// Mean magnitude across all I/Q slots.
@@ -104,9 +123,36 @@ public sealed class RoomBaseline
     /// <summary>
     /// True once the rolling window has filled and the per-slot variance has stabilized.
     /// Uses the 95th-percentile slot variance so the noisiest 5% of subcarriers (guard/null
-    /// carriers) do not prevent convergence.
+    /// carriers) do not prevent convergence. The threshold is 1.5 times the 95th-percentile
+    /// floor captured on the first full window (or first evaluation) and is configurable via
+    /// <see cref="ConvergenceVarianceMultiplier"/>.
     /// </summary>
-    public bool IsConverged => _totalFrames >= _windowSize && ComputePercentileVariance(0.95) < ConvergenceVarianceThreshold;
+    public bool IsConverged
+    {
+        get
+        {
+            if (_totalFrames < _windowSize)
+            {
+                return false;
+            }
+
+            double p95 = ComputePercentileVariance(0.95);
+
+            if (!_convergenceThresholdLocked)
+            {
+                _varianceFloor = p95;
+                _convergenceThreshold = _convergenceVarianceMultiplier * _varianceFloor;
+                _convergenceThresholdLocked = true;
+            }
+
+            return p95 <= _convergenceThreshold;
+        }
+    }
+
+    /// <summary>
+    /// 95th-percentile slot variance, which is the same metric used by <see cref="IsConverged"/>.
+    /// </summary>
+    public double PercentileVariance => ComputePercentileVariance(0.95);
 
     /// <summary>
     /// Running mean for every I/Q slot (length = 2 * SubcarrierCount).
@@ -201,11 +247,20 @@ public sealed class RoomBaseline
             throw new InvalidOperationException("Initialize must be called before Update.");
         }
 
-        if (csi.Length != _slotCount)
+        // Pad missing slots with zeros or truncate excess so minor firmware null-subcarrier
+        // stripping does not wipe the rolling Welford window and frame counters.
+        Span<double> csiToUse = stackalloc double[_slotCount];
+        if (csi.Length == _slotCount)
         {
-            throw new ArgumentException(
-                $"CSI array length {csi.Length} does not match the baseline slot count {_slotCount}.",
-                nameof(csi));
+            csi.CopyTo(csiToUse);
+        }
+        else
+        {
+            csi.Slice(0, Math.Min(csi.Length, _slotCount)).CopyTo(csiToUse);
+            if (csi.Length < _slotCount)
+            {
+                csiToUse.Slice(csi.Length).Clear();
+            }
         }
 
         Debug.Assert(_ringBuffer.Length == _slotCount * _windowSize, "Ring buffer must be fully initialized.");
@@ -250,7 +305,7 @@ public sealed class RoomBaseline
         var writeSpan = _ringBuffer.AsSpan(_head * _slotCount, _slotCount);
         for (int i = 0; i < _slotCount; i++)
         {
-            double x = csi[i] * scale;
+            double x = csiToUse[i] * scale;
             writeSpan[i] = x;
 
             var n = _counts[i] + 1;
@@ -366,6 +421,9 @@ public sealed class RoomBaseline
         _slotCount = _subcarrierCount * 2;
         _head = 0;
         _totalFrames = 0;
+        _convergenceThresholdLocked = false;
+        _varianceFloor = 0.0;
+        _convergenceThreshold = 0.0;
 
         _counts = new long[_slotCount];
         _welfordMean = new double[_slotCount];
