@@ -299,8 +299,11 @@ else
         .OrderByDescending(g => g.Sum(d => d.FrameCount)))
     {
         <div class="card mb-3">
-            <div class="card-header">
-                Target: @FormatMac(group.Key)
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span>Target: @FormatMac(group.Key)</span>
+                <span class="badge @GetWorstDropRateClass(group)">
+                    Δ @group.Max(d => d.FrameDelta) frames (@group.Max(d => d.DropRate).ToString("P1"))
+                </span>
             </div>
             <div class="card-body">
                 <div class="row text-center">
@@ -309,12 +312,17 @@ else
                         <div class="col-md-4">
                             <h6>@diag.NodeMac</h6>
                             <div>@diag.FrameCount frames</div>
+                            <div>Δ @diag.FrameDelta / @diag.DropRate.ToString("P1") drop</div>
                             <div>BW: @diag.Bandwidth MHz</div>
                             <div>Mean I/Q: @diag.MeanIq.ToString("F2")</div>
                             <div>Max Var: @diag.MaxVariance.ToString("F4")</div>
                             <span class="badge @GetConvergenceClass(diag)">
                                 @(diag.IsConverged ? "Converged" : "Learning")
                             </span>
+                            @if (diag.DropRate >= 0.10)
+                            {
+                                <span class="badge bg-danger ms-1">Sync loss</span>
+                            }
                         </div>
                     }
                 </div>
@@ -761,6 +769,17 @@ else
         return diag.IsConverged ? "bg-success" : "bg-warning text-dark";
     }
 
+    private static string GetWorstDropRateClass(IEnumerable<BaselineDiagnostic> group)
+    {
+        var worst = group.Max(d => d.DropRate);
+        return worst switch
+        {
+            >= 0.10 => "bg-danger",
+            >= 0.05 => "bg-warning text-dark",
+            _ => "bg-success"
+        };
+    }
+
     private static string FormatMac(ulong mac)
     {
         return $"{(mac >> 40) & 0xFF:X2}:{(mac >> 32) & 0xFF:X2}:{(mac >> 24) & 0xFF:X2}:{(mac >> 16) & 0xFF:X2}:{(mac >> 8) & 0xFF:X2}:{mac & 0xFF:X2}";
@@ -803,10 +822,27 @@ else
                 baseline.Bandwidth,
                 meanIq,
                 maxVariance,
-                baseline.IsConverged));
+                baseline.IsConverged,
+                0,
+                0.0));
         }
 
-        return list;
+        var enriched = new List<BaselineDiagnostic>(list.Count);
+        foreach (var group in list.GroupBy(d => d.SrcMac))
+        {
+            var leaderCount = group.Max(d => d.FrameCount);
+            foreach (var diag in group)
+            {
+                var delta = leaderCount - diag.FrameCount;
+                enriched.Add(diag with
+                {
+                    FrameDelta = delta,
+                    DropRate = leaderCount == 0 ? 0.0 : (double)delta / leaderCount,
+                });
+            }
+        }
+
+        return enriched;
     }
 
     private sealed record BaselineDiagnostic(
@@ -816,7 +852,9 @@ else
         int Bandwidth,
         double MeanIq,
         double MaxVariance,
-        bool IsConverged);
+        bool IsConverged,
+        long FrameDelta = 0,
+        double DropRate = 0.0);
 
     public ValueTask DisposeAsync()
     {
