@@ -138,21 +138,24 @@ public sealed class HardwareConfigService
 
     private static Dictionary<string, AoaEstimator.SensorPosition> BuildSensorPositions(ArrayGeometryOptions geometry)
     {
-        var positions = new Dictionary<string, AoaEstimator.SensorPosition>(StringComparer.OrdinalIgnoreCase);
+        var positions = new Dictionary<string, AoaEstimator.SensorPosition>(StringComparer.Ordinal);
 
-        if (!string.IsNullOrWhiteSpace(geometry.OriginMac))
+        var originMac = MacAddressFormatter.ToCanonical(geometry.OriginMac);
+        if (!string.IsNullOrEmpty(originMac))
         {
-            positions[geometry.OriginMac] = new AoaEstimator.SensorPosition(0.0, 0.0);
+            positions[originMac] = new AoaEstimator.SensorPosition(0.0, 0.0);
         }
 
-        if (!string.IsNullOrWhiteSpace(geometry.XArmMac))
+        var xArmMac = MacAddressFormatter.ToCanonical(geometry.XArmMac);
+        if (!string.IsNullOrEmpty(xArmMac))
         {
-            positions[geometry.XArmMac] = new AoaEstimator.SensorPosition(geometry.XArmSpacingMeters, 0.0);
+            positions[xArmMac] = new AoaEstimator.SensorPosition(geometry.XArmSpacingMeters, 0.0);
         }
 
-        if (!string.IsNullOrWhiteSpace(geometry.YArmMac))
+        var yArmMac = MacAddressFormatter.ToCanonical(geometry.YArmMac);
+        if (!string.IsNullOrEmpty(yArmMac))
         {
-            positions[geometry.YArmMac] = new AoaEstimator.SensorPosition(0.0, geometry.YArmSpacingMeters);
+            positions[yArmMac] = new AoaEstimator.SensorPosition(0.0, geometry.YArmSpacingMeters);
         }
 
         return positions;

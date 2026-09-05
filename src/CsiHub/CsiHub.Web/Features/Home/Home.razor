@@ -363,6 +363,85 @@
     </div>
 </div>
 
+<div class="card mb-3">
+    <div class="card-header">
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <span>Hardware Diagnostics</span>
+            <div class="d-flex gap-2">
+                <button class="btn btn-sm btn-outline-secondary" type="button" @onclick="SendSyncTestToAll">Test Sync (GPIO)</button>
+                <button class="btn btn-sm btn-outline-secondary" type="button" @onclick="SendRfTestToAll">Test RF (Spectrum)</button>
+            </div>
+        </div>
+    </div>
+    <div class="card-body">
+        <h6>STATE_DIAG_SYNC Telemetry</h6>
+        @if (GetSyncDiagnostics().Count == 0)
+        {
+            <p class="text-muted small mb-3">No sync diagnostic data. Run Test Sync and wait for telemetry.</p>
+        }
+        else
+        {
+            <table class="table table-sm">
+                <thead>
+                    <tr>
+                        <th>Node MAC</th>
+                        <th>Trigger Pulse Count</th>
+                        <th>ISR Latency (μs)</th>
+                        <th>Jitter (μs)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var row in GetSyncDiagnostics())
+                    {
+                        <tr>
+                            <td>@row.Mac</td>
+                            <td>@row.PulseCount</td>
+                            <td>@row.LatencyUs.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)</td>
+                            <td>@row.JitterUs.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+
+        <h6 class="mt-3">STATE_DIAG_RF Telemetry</h6>
+        @if (GetRfDiagnostics().Count == 0)
+        {
+            <p class="text-muted small mb-0">No RF diagnostic data. Run Test RF and wait for telemetry.</p>
+        }
+        else
+        {
+            <table class="table table-sm mb-0">
+                <thead>
+                    <tr>
+                        <th>Node MAC</th>
+                        <th>Channel</th>
+                        <th>RSSI Min</th>
+                        <th>RSSI Max</th>
+                        <th>RSSI Avg</th>
+                        <th>Packets</th>
+                        <th>Errors</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var row in GetRfDiagnostics())
+                    {
+                        <tr>
+                            <td>@row.Mac</td>
+                            <td>@row.Channel</td>
+                            <td>@row.RssiMin.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)</td>
+                            <td>@row.RssiMax.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)</td>
+                            <td>@row.RssiAvg.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)</td>
+                            <td>@row.Packets</td>
+                            <td>@row.Errors</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    </div>
+</div>
+
 <h4 class="mt-4">Baseline Convergence</h4>
 @if (Dsp.Baselines.Count == 0)
 {
@@ -1031,6 +1110,52 @@ else
     }
 
     private sealed record TargetPlacement(string Mac, string X, string Y, string Radius, string Color);
+
+    private sealed record SyncDiagnosticRow(string Mac, long PulseCount, double LatencyUs, double JitterUs);
+
+    private sealed record RfDiagnosticRow(string Mac, int Channel, double RssiMin, double RssiMax, double RssiAvg, long Packets, long Errors);
+
+    private IReadOnlyList<SyncDiagnosticRow> GetSyncDiagnostics()
+    {
+        var rows = new List<SyncDiagnosticRow>();
+
+        foreach (var node in Store.Nodes.Values
+            .Where(n => n.SyncDiag is not null)
+            .OrderBy(n => n.Mac ?? n.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            rows.Add(new SyncDiagnosticRow(
+                node.Mac ?? node.Key,
+                node.SyncDiag!.PulseCount,
+                node.SyncDiag!.LatencyUs,
+                node.SyncDiag!.JitterUs));
+        }
+
+        return rows;
+    }
+
+    private IReadOnlyList<RfDiagnosticRow> GetRfDiagnostics()
+    {
+        var rows = new List<RfDiagnosticRow>();
+
+        foreach (var node in Store.Nodes.Values
+            .Where(n => n.State == NodeConnectionState.DiagRf || n.RfScan.Count > 0)
+            .OrderBy(n => n.Mac ?? n.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            foreach (var (channel, rf) in node.RfScan.OrderBy(kv => kv.Key))
+            {
+                rows.Add(new RfDiagnosticRow(
+                    node.Mac ?? node.Key,
+                    channel,
+                    rf.RssiMin,
+                    rf.RssiMax,
+                    rf.RssiAvg,
+                    rf.Packets,
+                    rf.Errors));
+            }
+        }
+
+        return rows;
+    }
 
     public ValueTask DisposeAsync()
     {

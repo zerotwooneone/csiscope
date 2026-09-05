@@ -57,4 +57,9 @@ public sealed class NodeStateViewModel
     /// Latest RF scan results keyed by channel, populated from <c>rf_scan</c> payloads.
     /// </summary>
     public Dictionary<int, RfChannelMetrics> RfScan { get; set; } = new();
+
+    /// <summary>
+    /// Latest sync diagnostic metrics for this node, populated from <c>diag</c> payloads.
+    /// </summary>
+    public SyncDiagnosticMetrics? SyncDiag { get; set; }
 }

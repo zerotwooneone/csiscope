@@ -60,6 +60,11 @@ public sealed class NodePayload
     public RfChannelMetrics? Rf { get; set; }
 
     /// <summary>
+    /// Sync diagnostic metrics, present when <see cref="Type"/> is "diag" and the test is "sync".
+    /// </summary>
+    public SyncDiagnosticMetrics? SyncDiag { get; set; }
+
+    /// <summary>
     /// The host-local time the payload was received.
     /// </summary>
     public DateTimeOffset ReceivedAt { get; set; }

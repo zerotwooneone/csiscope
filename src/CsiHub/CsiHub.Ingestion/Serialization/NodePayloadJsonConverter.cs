@@ -20,6 +20,7 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
         }
 
         var payload = new NodePayload();
+        string? testType = null;
 
         while (reader.Read())
         {
@@ -75,6 +76,32 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
 
                 case "reason":
                     payload.Reason = reader.GetString();
+                    break;
+
+                case "test":
+                case "diag_type":
+                    testType = reader.GetString();
+                    break;
+
+                case "pulse_count":
+                    if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt64(out var pulseCount))
+                    {
+                        EnsureSyncDiag(payload).PulseCount = pulseCount;
+                    }
+                    break;
+
+                case "latency_us":
+                    if (reader.TokenType == JsonTokenType.Number && reader.TryGetDouble(out var latencyUs))
+                    {
+                        EnsureSyncDiag(payload).LatencyUs = latencyUs;
+                    }
+                    break;
+
+                case "jitter_us":
+                    if (reader.TokenType == JsonTokenType.Number && reader.TryGetDouble(out var jitterUs))
+                    {
+                        EnsureSyncDiag(payload).JitterUs = jitterUs;
+                    }
                     break;
 
                 case "clock_leader":
@@ -201,12 +228,22 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
             }
         }
 
+        if (payload.Type != "diag" || testType != "sync")
+        {
+            payload.SyncDiag = null;
+        }
+
         return payload;
     }
 
     private static RfChannelMetrics EnsureRf(NodePayload payload)
     {
         return payload.Rf ??= new RfChannelMetrics();
+    }
+
+    private static SyncDiagnosticMetrics EnsureSyncDiag(NodePayload payload)
+    {
+        return payload.SyncDiag ??= new SyncDiagnosticMetrics();
     }
 
     private static List<RfMacMetrics>? ReadTopMacs(ref Utf8JsonReader reader)

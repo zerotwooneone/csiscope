@@ -330,6 +330,25 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
                     AggregateRfScan(payload.Rf);
                     AggregateAndAdvanceSweep(payload);
                 }
+
+                if (payload.Type == "diag" && !string.IsNullOrWhiteSpace(payload.Mac) && payload.SyncDiag is not null)
+                {
+                    _nodes.AddOrUpdate(
+                        payload.Mac,
+                        _ => new NodeStateViewModel
+                        {
+                            Key = payload.Mac,
+                            PortName = payload.PortName ?? string.Empty,
+                            Mac = payload.Mac,
+                            State = NodeConnectionState.Standby,
+                            SyncDiag = payload.SyncDiag,
+                        },
+                        (_, existing) =>
+                        {
+                            existing.SyncDiag = payload.SyncDiag;
+                            return existing;
+                        });
+                }
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

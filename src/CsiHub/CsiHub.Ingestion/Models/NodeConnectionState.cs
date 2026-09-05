@@ -8,5 +8,7 @@ public enum NodeConnectionState
     Disconnected,
     Standby,
     Assigned,
-    Streaming
+    Streaming,
+    DiagSync,
+    DiagRf
 }

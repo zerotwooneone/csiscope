@@ -685,6 +685,8 @@ public sealed class SerialPipelineReader
         {
             "standby" or "boot" => NodeConnectionState.Standby,
             "streaming" => NodeConnectionState.Streaming,
+            "diag_sync" => NodeConnectionState.DiagSync,
+            "diag_rf" => NodeConnectionState.DiagRf,
             null => NodeConnectionState.Disconnected,
             _ when lowered.StartsWith("diag_") => NodeConnectionState.Assigned,
             _ => NodeConnectionState.Standby

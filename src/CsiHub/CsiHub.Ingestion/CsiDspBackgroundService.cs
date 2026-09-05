@@ -101,7 +101,9 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
                     continue;
                 }
 
-                var key = (NodeMac: payload.Mac!, SrcMac: payload.SrcMac ?? 0UL);
+                var rawMac = payload.Mac!;
+                var key = (NodeMac: rawMac, SrcMac: payload.SrcMac ?? 0UL);
+                var sampleKey = (NodeMac: MacAddressFormatter.ToCanonical(rawMac), SrcMac: key.SrcMac);
 
                 if (payload.Type == "csi" && payload.Csi is not null)
                 {
@@ -140,7 +142,7 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
                     csiBaseline.LastSeen = payload.ReceivedAt;
                     _lastUpdateAt[key] = payload.ReceivedAt;
 
-                    _latestSamples[key] = (GetSubcarrierSample(payload.Csi, aoaOptions.SubcarrierIndex), payload.ReceivedAt);
+                    _latestSamples[sampleKey] = (GetSubcarrierSample(payload.Csi, aoaOptions.SubcarrierIndex), payload.ReceivedAt);
                     TryUpdateAoa(key.SrcMac, payload.ReceivedAt, aoaOptions);
                 }
 
@@ -168,11 +170,12 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
         var sensors = new List<AoaEstimator.SensorPosition>(aoaOptions.SensorPositions.Count);
         var samples = new List<Complex>(aoaOptions.SensorPositions.Count);
 
-        foreach (var (nodeMac, position) in aoaOptions.SensorPositions)
+        foreach (var (configuredMac, position) in aoaOptions.SensorPositions)
         {
+            var nodeMac = MacAddressFormatter.ToCanonical(configuredMac);
             if (!_latestSamples.TryGetValue((nodeMac, srcMac), out var entry))
             {
-                LastAoaStatus = $"Waiting for node {nodeMac}";
+                LastAoaStatus = $"Waiting for node {configuredMac}";
                 return;
             }
 
