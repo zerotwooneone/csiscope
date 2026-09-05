@@ -238,7 +238,7 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
             },
             (_, existing) =>
             {
-                existing.ActiveErrors = GetSnapshot(key);
+                ApplyErrors(existing, key);
                 return existing;
             });
 
@@ -263,8 +263,17 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
 
                 _nodes.AddOrUpdate(
                     key,
-                    _ => CreateViewModel(state, key, existingConfig),
-                    (_, existing) => CreateViewModel(state, key, existingConfig, existing));
+                    _ =>
+                    {
+                        var node = new NodeStateViewModel { Key = key };
+                        ApplyConnectionState(node, state, existingConfig);
+                        return node;
+                    },
+                    (_, existing) =>
+                    {
+                        ApplyConnectionState(existing, state, existingConfig);
+                        return existing;
+                    });
 
                 if (state.Mac is not null && state.Bandwidth.HasValue)
                 {
@@ -310,7 +319,7 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
                 {
                     _logger.LogInformation("Node {Mac} reported boot; clearing active errors.", payload.Mac);
                     ClearErrors(payload.Mac);
-                    _rfScanResults.TryRemove(payload.Mac, out _);
+                    ClearDiagnostics(payload.Mac);
                 }
 
                 if (payload.Type == "rf_scan" && !string.IsNullOrWhiteSpace(payload.Mac) && payload.Rf is not null)
@@ -336,7 +345,7 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
                         },
                         (_, existing) =>
                         {
-                            existing.RfScan = GetRfSnapshot(payload.Mac);
+                            ApplyRfScan(existing, payload.Mac);
                             return existing;
                         });
 
@@ -344,7 +353,7 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
                     AggregateAndAdvanceSweep(payload);
                 }
 
-                if (payload.Type == "diag" && !string.IsNullOrWhiteSpace(payload.Mac) && payload.SyncDiag is not null)
+                if (payload.Type == "diag" && payload.Test == "sync" && !string.IsNullOrWhiteSpace(payload.Mac) && payload.SyncDiag is not null)
                 {
                     _nodes.AddOrUpdate(
                         payload.Mac,
@@ -358,7 +367,7 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
                         },
                         (_, existing) =>
                         {
-                            existing.SyncDiag = payload.SyncDiag;
+                            ApplySyncDiagnostics(existing, payload.SyncDiag);
                             return existing;
                         });
                 }
@@ -433,7 +442,7 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
             },
             (_, existing) =>
             {
-                existing.ActiveErrors = GetSnapshot(mac);
+                ApplyErrors(existing, mac);
                 return existing;
             });
 
@@ -460,55 +469,86 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
         };
     }
 
-    private NodeStateViewModel CreateViewModel(
+    private void ApplyConnectionState(
+        NodeStateViewModel node,
         NodeStateChanged state,
-        string key,
-        NodeConfiguration? configuration,
-        NodeStateViewModel? existing = null)
+        NodeConfiguration? configuration)
     {
-        var mac = state.Mac ?? existing?.Mac;
+        node.PortName = state.PortName;
+        node.Mac = state.Mac ?? node.Mac;
+        node.State = state.State;
+        node.Uptime = state.Uptime ?? node.Uptime;
+        node.LastSeen = state.ReceivedAt ?? state.Timestamp;
+        node.ClockLeader = state.ClockLeader ?? node.ClockLeader;
+        node.ImuHost = state.ImuHost ?? node.ImuHost;
+        node.Bandwidth = state.Bandwidth ?? configuration?.Bandwidth ?? node.Bandwidth;
+        node.Configuration = configuration;
 
-        if (mac is not null && configuration is not null)
+        if (node.Mac is not null && configuration is not null)
         {
             if (state.ClockLeader.HasValue &&
                 configuration.ClockLeader.HasValue &&
                 state.ClockLeader.Value == configuration.ClockLeader.Value)
             {
-                _activeErrors.TryGetValue(mac, out var clockErrors);
+                _activeErrors.TryGetValue(node.Mac, out var clockErrors);
                 clockErrors?.TryRemove("clock_leader", out _);
-                RemoveUnavailable(mac, "clock_leader");
+                RemoveUnavailable(node.Mac, "clock_leader");
             }
 
             if (state.ImuHost.HasValue &&
                 configuration.ImuHost.HasValue &&
                 state.ImuHost.Value == configuration.ImuHost.Value)
             {
-                _activeErrors.TryGetValue(mac, out var imuErrors);
+                _activeErrors.TryGetValue(node.Mac, out var imuErrors);
                 imuErrors?.TryRemove("imu_host", out _);
-                RemoveUnavailable(mac, "imu_host");
+                RemoveUnavailable(node.Mac, "imu_host");
             }
 
-            if (_activeErrors.TryGetValue(mac, out var errors) && errors.IsEmpty)
+            if (_activeErrors.TryGetValue(node.Mac, out var errors) && errors.IsEmpty)
             {
-                _activeErrors.TryRemove(mac, out _);
+                _activeErrors.TryRemove(node.Mac, out _);
             }
         }
 
-        return new NodeStateViewModel
+        if (node.Mac is not null)
         {
-            Key = key,
-            PortName = state.PortName,
-            Mac = mac,
-            State = state.State,
-            Uptime = state.Uptime ?? existing?.Uptime,
-            LastSeen = state.ReceivedAt ?? state.Timestamp,
-            ClockLeader = state.ClockLeader,
-            ImuHost = state.ImuHost,
-            Bandwidth = state.Bandwidth ?? configuration?.Bandwidth ?? existing?.Bandwidth,
-            Configuration = configuration,
-            ActiveErrors = mac is not null ? GetSnapshot(mac) : existing?.ActiveErrors ?? new Dictionary<string, string>(),
-            RfScan = mac is not null ? GetRfSnapshot(mac) : existing?.RfScan ?? new Dictionary<int, RfChannelMetrics>(),
-        };
+            ApplyErrors(node, node.Mac);
+        }
+
+        if (state.State != NodeConnectionState.DiagSync)
+        {
+            node.SyncDiag = null;
+        }
+    }
+
+    private void ApplySyncDiagnostics(NodeStateViewModel node, SyncDiagnosticMetrics? syncDiag)
+    {
+        node.SyncDiag = syncDiag;
+    }
+
+    private void ApplyRfScan(NodeStateViewModel node, string mac)
+    {
+        node.RfScan = GetRfSnapshot(mac);
+    }
+
+    private void ApplyErrors(NodeStateViewModel node, string mac)
+    {
+        node.ActiveErrors = GetSnapshot(mac);
+    }
+
+    private void ClearDiagnostics(string mac)
+    {
+        _nodes.AddOrUpdate(
+            mac,
+            _ => new NodeStateViewModel { Key = mac, Mac = mac },
+            (_, existing) =>
+            {
+                existing.SyncDiag = null;
+                existing.RfScan = new Dictionary<int, RfChannelMetrics>();
+                return existing;
+            });
+
+        _rfScanResults.TryRemove(mac, out _);
     }
 
     private static Dictionary<string, string> GetSnapshot(ConcurrentDictionary<string, ConcurrentDictionary<string, string>> source, string mac)

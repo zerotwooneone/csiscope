@@ -17,6 +17,7 @@ public sealed class CsiNodePortManager
     private readonly CsiIngestionChannel _channel;
     private readonly ISerialPortFactory _portFactory;
     private readonly ILogger<CsiNodePortManager> _logger;
+    private readonly IEnumerable<IPayloadHandler> _handlers;
 
     private CancellationTokenSource? _cts;
     private readonly ConcurrentDictionary<string, SerialPipelineReader> _readers = new();
@@ -26,12 +27,14 @@ public sealed class CsiNodePortManager
         IOptions<CsiIngestionOptions> options,
         CsiIngestionChannel channel,
         ISerialPortFactory portFactory,
-        ILogger<CsiNodePortManager> logger)
+        ILogger<CsiNodePortManager> logger,
+        IEnumerable<IPayloadHandler> handlers)
     {
         _options = options.Value;
         _channel = channel;
         _portFactory = portFactory;
         _logger = logger;
+        _handlers = handlers;
     }
 
     /// <summary>
@@ -61,7 +64,8 @@ public sealed class CsiNodePortManager
                 _options.CommandChannelCapacity,
                 _options.ReconnectDelayMs,
                 _channel,
-                _logger);
+                _logger,
+                _handlers);
 
             _readers[portName] = reader;
 

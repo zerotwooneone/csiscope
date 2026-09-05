@@ -1,6 +1,7 @@
 using CsiHub.Ingestion.Channels;
 using CsiHub.Ingestion.IntegrationTests.Fakes;
 using CsiHub.Ingestion.Pipelines;
+using CsiHub.Ingestion.Pipelines.Handlers;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
@@ -36,7 +37,15 @@ public sealed class SerialPipelineTestHarness : IAsyncDisposable
             commandChannelCapacity: 16,
             reconnectDelayMs: 2000,
             _channel,
-            NullLogger<SerialPipelineReader>.Instance);
+            NullLogger<SerialPipelineReader>.Instance,
+            new IPayloadHandler[]
+            {
+                new ConfigHandler(),
+                new HeartbeatHandler(),
+                new AckHandler(),
+                new TelemetryHandler(),
+                new IgnoredHandler(),
+            });
 
         _cts = new CancellationTokenSource();
         _runTask = Task.Run(() => _reader.RunAsync(_cts.Token));

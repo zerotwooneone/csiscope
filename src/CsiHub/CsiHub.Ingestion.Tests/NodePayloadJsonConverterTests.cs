@@ -182,4 +182,87 @@ public class NodePayloadJsonConverterTests
         Assert.Null(payload.Csi);
         Assert.Null(payload.Imu);
     }
+
+    [Fact]
+    public void Can_Parse_Imu_Quaternion_Fields()
+    {
+        const string json = """{"type":"imu","mac":"AA:BB:CC:DD:EE:FF","t":12345,"qw":1.0,"qx":0.1,"qy":-0.2,"qz":0.3}""";
+
+        var payload = JsonSerializer.Deserialize<NodePayload>(json);
+
+        Assert.NotNull(payload);
+        Assert.Equal("imu", payload.Type);
+        Assert.Equal("AA:BB:CC:DD:EE:FF", payload.Mac);
+        Assert.Equal(12345L, payload.Timestamp);
+        // Quaternion fields are stored in [w, x, y, z] order.
+        Assert.Equal(new[] { 1.0, 0.1, -0.2, 0.3 }, payload.Imu);
+    }
+
+    [Fact]
+    public void Imu_Is_Null_When_Quaternion_Is_Incomplete()
+    {
+        const string json = """{"type":"imu","mac":"AA:BB:CC:DD:EE:FF","qw":1.0,"qx":0.1,"qy":-0.2}""";
+
+        var payload = JsonSerializer.Deserialize<NodePayload>(json);
+
+        Assert.NotNull(payload);
+        Assert.Equal("imu", payload.Type);
+        Assert.Null(payload.Imu);
+    }
+
+    [Fact]
+    public void Can_Parse_Diag_Sync_Payload()
+    {
+        const string json = """{"type":"diag","test":"sync","mac":"AA:BB:CC:DD:EE:FF","pulse_count":42,"latency_us":1.25,"jitter_us":0.5}""";
+
+        var payload = JsonSerializer.Deserialize<NodePayload>(json);
+
+        Assert.NotNull(payload);
+        Assert.Equal("diag", payload.Type);
+        Assert.Equal("sync", payload.Test);
+        Assert.NotNull(payload.SyncDiag);
+        Assert.Equal(42, payload.SyncDiag.PulseCount);
+        Assert.Equal(1.25, payload.SyncDiag.LatencyUs);
+        Assert.Equal(0.5, payload.SyncDiag.JitterUs);
+    }
+
+    [Fact]
+    public void Can_Parse_Ack_With_Success_And_Seq()
+    {
+        const string json = """{"type":"ack","cmd":"set_rf","success":true,"seq":7,"state":"streaming"}""";
+
+        var payload = JsonSerializer.Deserialize<NodePayload>(json);
+
+        Assert.NotNull(payload);
+        Assert.Equal("ack", payload.Type);
+        Assert.Equal("set_rf", payload.Cmd);
+        Assert.True(payload.Success);
+        Assert.Equal(7, payload.Seq);
+        Assert.Equal("streaming", payload.State);
+    }
+
+    [Fact]
+    public void Can_Parse_Boot_Payload()
+    {
+        const string json = """{"type":"boot","mac":"AA:BB:CC:DD:EE:FF","state":"boot"}""";
+
+        var payload = JsonSerializer.Deserialize<NodePayload>(json);
+
+        Assert.NotNull(payload);
+        Assert.Equal("boot", payload.Type);
+        Assert.Equal("AA:BB:CC:DD:EE:FF", payload.Mac);
+        Assert.Equal("boot", payload.State);
+    }
+
+    [Fact]
+    public void Can_Parse_Post_Payload()
+    {
+        const string json = """{"type":"post","mac":"AA:BB:CC:DD:EE:FF","imu":true}""";
+
+        var payload = JsonSerializer.Deserialize<NodePayload>(json);
+
+        Assert.NotNull(payload);
+        Assert.Equal("post", payload.Type);
+        Assert.Equal("AA:BB:CC:DD:EE:FF", payload.Mac);
+    }
 }

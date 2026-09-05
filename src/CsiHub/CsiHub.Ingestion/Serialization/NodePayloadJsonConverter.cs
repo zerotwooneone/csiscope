@@ -20,7 +20,10 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
         }
 
         var payload = new NodePayload();
-        string? testType = null;
+        double? imuW = null;
+        double? imuX = null;
+        double? imuY = null;
+        double? imuZ = null;
 
         while (reader.Read())
         {
@@ -78,9 +81,16 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
                     payload.Reason = reader.GetString();
                     break;
 
+                case "success":
+                    if (reader.TokenType == JsonTokenType.True || reader.TokenType == JsonTokenType.False)
+                    {
+                        payload.Success = reader.GetBoolean();
+                    }
+                    break;
+
                 case "test":
                 case "diag_type":
-                    testType = reader.GetString();
+                    payload.Test = reader.GetString();
                     break;
 
                 case "pulse_count":
@@ -158,6 +168,34 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
                     payload.Imu = ReadDoubleArray(ref reader);
                     break;
 
+                case "qw":
+                    if (reader.TokenType == JsonTokenType.Number && reader.TryGetDouble(out var qw))
+                    {
+                        imuW = qw;
+                    }
+                    break;
+
+                case "qx":
+                    if (reader.TokenType == JsonTokenType.Number && reader.TryGetDouble(out var qx))
+                    {
+                        imuX = qx;
+                    }
+                    break;
+
+                case "qy":
+                    if (reader.TokenType == JsonTokenType.Number && reader.TryGetDouble(out var qy))
+                    {
+                        imuY = qy;
+                    }
+                    break;
+
+                case "qz":
+                    if (reader.TokenType == JsonTokenType.Number && reader.TryGetDouble(out var qz))
+                    {
+                        imuZ = qz;
+                    }
+                    break;
+
                 case "ch":
                     if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt32(out var ch))
                     {
@@ -228,9 +266,9 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
             }
         }
 
-        if (payload.Type != "diag" || testType != "sync")
+        if (imuW.HasValue && imuX.HasValue && imuY.HasValue && imuZ.HasValue)
         {
-            payload.SyncDiag = null;
+            payload.Imu = new[] { imuW.Value, imuX.Value, imuY.Value, imuZ.Value };
         }
 
         return payload;
@@ -424,6 +462,16 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
         if (value.Reason is not null)
         {
             writer.WriteString("reason", value.Reason);
+        }
+
+        if (value.Test is not null)
+        {
+            writer.WriteString("test", value.Test);
+        }
+
+        if (value.Success.HasValue)
+        {
+            writer.WriteBoolean("success", value.Success.Value);
         }
 
         if (value.ClockLeader.HasValue)

@@ -20,6 +20,11 @@ builder.Services.AddSingleton<CsiNodeStateStore>();
 builder.Services.AddSingleton<IHostedService>(provider => provider.GetRequiredService<CsiNodeStateStore>());
 builder.Services.AddSingleton<HardwareConfigService>();
 
+if (builder.Environment.IsDevelopment())
+{
+    builder.Services.AddHostedService<FakeImuSource>();
+}
+
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.

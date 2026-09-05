@@ -131,4 +131,91 @@ public class SerialPipelineReaderTests
         Assert.Equal(6, payload.Rf.Channel);
     }
 
+    [Fact]
+    public async Task Imu_Frame_Is_Published_With_Quaternion()
+    {
+        await using var harness = new SerialPipelineTestHarness("COM11");
+
+        await TestHelper.WaitForOpenAsync(harness.Port);
+        await TestHelper.WriteFrameAsync(harness.Port.Downlink, """{"type":"config","mac":"00:11:22:33:44:55","state":"standby","baud":921600,"bw":20,"version":"0.1.0"}""");
+        await TestHelper.WriteFrameAsync(harness.Port.Downlink, """{"type":"imu","mac":"00:11:22:33:44:55","t":12345,"qw":1.0,"qx":0.1,"qy":-0.2,"qz":0.3}""");
+
+        var payload = await harness.Channel.StateStorePayloadReader.ReadAsync().AsTask()
+            .WaitAsync(TimeSpan.FromSeconds(1));
+
+        Assert.Equal("imu", payload.Type);
+        Assert.Equal("00:11:22:33:44:55", payload.Mac);
+        // Quaternion fields are stored in [w, x, y, z] order.
+        Assert.Equal(new[] { 1.0, 0.1, -0.2, 0.3 }, payload.Imu);
+    }
+
+    [Fact]
+    public async Task Boot_Frame_Is_Published_And_Maps_To_Standby()
+    {
+        await using var harness = new SerialPipelineTestHarness("COM12");
+
+        await TestHelper.WaitForOpenAsync(harness.Port);
+        await TestHelper.WriteFrameAsync(harness.Port.Downlink, """{"type":"config","mac":"00:11:22:33:44:55","state":"streaming","baud":921600,"bw":20,"version":"0.1.0"}""");
+
+        // Drain the streaming state published when config is ingested.
+        var configState = await harness.Channel.StateReader.ReadAsync().AsTask()
+            .WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.Equal(NodeConnectionState.Streaming, configState.State);
+
+        await TestHelper.WriteFrameAsync(harness.Port.Downlink, """{"type":"boot","mac":"00:11:22:33:44:55","state":"boot"}""");
+
+        var payload = await harness.Channel.StateStorePayloadReader.ReadAsync().AsTask()
+            .WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.Equal("boot", payload.Type);
+
+        var bootState = await harness.Channel.StateReader.ReadAsync().AsTask()
+            .WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.Equal(NodeConnectionState.Standby, bootState.State);
+    }
+
+    [Fact]
+    public async Task Post_Frame_Is_Ignored()
+    {
+        await using var harness = new SerialPipelineTestHarness("COM13");
+
+        await TestHelper.WaitForOpenAsync(harness.Port);
+        await TestHelper.WriteFrameAsync(harness.Port.Downlink, """{"type":"config","mac":"00:11:22:33:44:55","state":"standby","baud":921600,"bw":20,"version":"0.1.0"}""");
+        await TestHelper.WriteFrameAsync(harness.Port.Downlink, """{"type":"post","mac":"00:11:22:33:44:55","imu":true}""");
+
+        bool received;
+        try
+        {
+            received = await harness.Channel.StateStorePayloadReader
+                .WaitToReadAsync()
+                .AsTask()
+                .WaitAsync(TimeSpan.FromMilliseconds(300));
+        }
+        catch (TimeoutException)
+        {
+            received = false;
+        }
+
+        Assert.False(received);
+    }
+
+    [Fact]
+    public async Task Diag_Sync_Frame_Is_Published_With_Metrics()
+    {
+        await using var harness = new SerialPipelineTestHarness("COM14");
+
+        await TestHelper.WaitForOpenAsync(harness.Port);
+        await TestHelper.WriteFrameAsync(harness.Port.Downlink, """{"type":"config","mac":"00:11:22:33:44:55","state":"standby","baud":921600,"bw":20,"version":"0.1.0"}""");
+        await TestHelper.WriteFrameAsync(harness.Port.Downlink, """{"type":"diag","test":"sync","mac":"00:11:22:33:44:55","pulse_count":42,"latency_us":1.25,"jitter_us":0.5}""");
+
+        var payload = await harness.Channel.StateStorePayloadReader.ReadAsync().AsTask()
+            .WaitAsync(TimeSpan.FromSeconds(1));
+
+        Assert.Equal("diag", payload.Type);
+        Assert.Equal("sync", payload.Test);
+        Assert.NotNull(payload.SyncDiag);
+        Assert.Equal(42, payload.SyncDiag.PulseCount);
+        Assert.Equal(1.25, payload.SyncDiag.LatencyUs);
+        Assert.Equal(0.5, payload.SyncDiag.JitterUs);
+    }
+
 }

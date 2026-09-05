@@ -27,12 +27,10 @@ public sealed class SerialPipelineReader
     private readonly CsiIngestionChannel _channel;
     private readonly ILogger _logger;
     private readonly Channel<string> _commandChannel;
-    private readonly ConcurrentDictionary<int, TaskCompletionSource<Ack>> _pendingAcks = new();
+    private readonly PayloadDispatcher _dispatcher;
+    private readonly SerialPipelineContext _context;
 
-    private string? _lastMac;
-    private NodeConnectionState _lastState = NodeConnectionState.Disconnected;
     private int _nextSeq = 0;
-    private bool _hasSeenConfig;
 
     public SerialPipelineReader(
         string portName,
@@ -40,13 +38,16 @@ public sealed class SerialPipelineReader
         int commandChannelCapacity,
         int reconnectDelayMs,
         CsiIngestionChannel channel,
-        ILogger logger)
+        ILogger logger,
+        IEnumerable<IPayloadHandler> handlers)
     {
         _portName = portName;
         _portFactory = portFactory;
         _reconnectDelayMs = reconnectDelayMs;
         _channel = channel;
         _logger = logger;
+        _dispatcher = new PayloadDispatcher(handlers);
+        _context = new SerialPipelineContext(portName, channel, logger);
 
         _commandChannel = Channel.CreateBounded<string>(new BoundedChannelOptions(commandChannelCapacity)
         {
@@ -90,13 +91,13 @@ public sealed class SerialPipelineReader
             }
 
             var tcs = new TaskCompletionSource<Ack>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _pendingAcks[seq] = tcs;
+            _context.PendingAcks[seq] = tcs;
 
             try
             {
                 if (!TrySendCommand(framedJson))
                 {
-                    _pendingAcks.TryRemove(seq, out _);
+                    _context.PendingAcks.TryRemove(seq, out _);
                     _logger.LogWarning("Command channel full; dropping command to {Port}.", _portName);
                     continue;
                 }
@@ -106,7 +107,7 @@ public sealed class SerialPipelineReader
             }
             catch (TimeoutException)
             {
-                _pendingAcks.TryRemove(seq, out _);
+                _context.PendingAcks.TryRemove(seq, out _);
 
                 if (attempt == retries - 1)
                 {
@@ -126,12 +127,12 @@ public sealed class SerialPipelineReader
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                _pendingAcks.TryRemove(seq, out _);
+                _context.PendingAcks.TryRemove(seq, out _);
                 throw;
             }
             catch (Exception ex)
             {
-                _pendingAcks.TryRemove(seq, out _);
+                _context.PendingAcks.TryRemove(seq, out _);
                 _logger.LogWarning(ex, "Command to {Port} failed.", _portName);
                 return null;
             }
@@ -180,11 +181,11 @@ public sealed class SerialPipelineReader
 
                 // RunOnceAsync returned normally (stream ended). Publish disconnected
                 // and attempt a reconnect after the configured delay.
-                PublishState(NodeConnectionState.Disconnected);
+                _context.PublishState(NodeConnectionState.Disconnected);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                PublishState(NodeConnectionState.Disconnected);
+                _context.PublishState(NodeConnectionState.Disconnected);
                 break;
             }
             catch (Exception ex)
@@ -194,7 +195,7 @@ public sealed class SerialPipelineReader
                     _portName,
                     _reconnectDelayMs);
 
-                PublishState(NodeConnectionState.Disconnected);
+                _context.PublishState(NodeConnectionState.Disconnected);
             }
 
             if (!cancellationToken.IsCancellationRequested)
@@ -222,7 +223,7 @@ public sealed class SerialPipelineReader
             _portName);
 
         // Wait for the node to announce its config before processing telemetry.
-        _hasSeenConfig = false;
+        _context.HasSeenConfig = false;
 
         // The first heartbeat or state-bearing payload will publish the real state
         // and carry the node's MAC and uptime, so we do not emit an empty Standby here.
@@ -371,27 +372,6 @@ public sealed class SerialPipelineReader
         }
     }
 
-    private static bool TryFindFirstNonWhitespace(ReadOnlySequence<byte> line, out byte value)
-    {
-        value = 0;
-
-        foreach (var segment in line)
-        {
-            ReadOnlySpan<byte> span = segment.Span;
-            for (int i = 0; i < span.Length; i++)
-            {
-                byte b = span[i];
-                if (b != (byte)' ' && b != (byte)'\t' && b != (byte)'\r' && b != (byte)'\n')
-                {
-                    value = b;
-                    return true;
-                }
-            }
-        }
-
-        return false;
-    }
-
     private void ProcessFrame(ReadOnlySequence<byte> payload)
     {
         if (payload.Length == 0)
@@ -416,15 +396,25 @@ public sealed class SerialPipelineReader
             }
 
             ReadOnlySpan<byte> span = memory.Span;
-            using var doc = JsonDocument.Parse(memory);
-            JsonElement root = doc.RootElement;
-
-            if (!_hasSeenConfig)
+            var nodePayload = JsonSerializer.Deserialize<NodePayload>(span, JsonOptions);
+            if (nodePayload is null || string.IsNullOrWhiteSpace(nodePayload.Type))
             {
-                if (root.TryGetProperty("type", out var typeProp) && typeProp.GetString() == "config")
+                return;
+            }
+
+            nodePayload.ReceivedAt = DateTimeOffset.UtcNow;
+            nodePayload.PortName = _portName;
+
+            if (!string.IsNullOrEmpty(nodePayload.Mac))
+            {
+                _context.LastMac = nodePayload.Mac;
+            }
+
+            if (!_context.HasSeenConfig)
+            {
+                if (nodePayload.Type == "config")
                 {
-                    _hasSeenConfig = true;
-                    ProcessConfig(root);
+                    _dispatcher.Dispatch(nodePayload, span, _context);
                 }
                 else
                 {
@@ -434,49 +424,7 @@ public sealed class SerialPipelineReader
                 return;
             }
 
-            if (!root.TryGetProperty("type", out var typeElement) || typeElement.ValueKind != JsonValueKind.String)
-            {
-                return;
-            }
-
-            string? type = typeElement.GetString();
-            switch (type)
-            {
-                case "csi":
-                    ProcessSpan(span);
-                    break;
-
-                case "hb":
-                    ProcessHeartbeat(root);
-                    break;
-
-                case "config":
-                    ProcessConfig(root);
-                    break;
-
-                case "ack":
-                    ProcessAck(root);
-                    break;
-
-                case "error":
-                    ProcessError(root);
-                    break;
-
-                case "rf_scan":
-                    ProcessSpan(span);
-                    break;
-
-                case "boot":
-                case "post":
-                case "diag":
-                case "imu":
-                    _logger.LogDebug("Ignoring telemetry frame of type {Type} from {Port}.", type, _portName);
-                    break;
-
-                default:
-                    _logger.LogWarning("Unknown frame type {Type} from {Port}.", type, _portName);
-                    break;
-            }
+            _dispatcher.Dispatch(nodePayload, span, _context);
         }
         catch (JsonException ex)
         {
@@ -493,233 +441,5 @@ public sealed class SerialPipelineReader
                 ArrayPool<byte>.Shared.Return(rented, clearArray: false);
             }
         }
-    }
-
-    private void ProcessHeartbeat(JsonElement root)
-    {
-        string? mac = TryReadStringProperty(root, "mac");
-        if (!string.IsNullOrEmpty(mac))
-        {
-            _lastMac = mac;
-        }
-
-        if (!root.TryGetProperty("state", out var stateProp) || stateProp.ValueKind != JsonValueKind.String)
-        {
-            return;
-        }
-
-        long? uptime = TryReadInt64Property(root, "uptime");
-        bool? clockLeader = TryReadBooleanProperty(root, "clock_leader");
-        bool? imuHost = TryReadBooleanProperty(root, "imu_host");
-        int? bandwidth = TryReadInt32Property(root, "bw") ?? TryReadInt32Property(root, "bandwidth");
-
-        PublishState(
-            ParseConnectionState(stateProp.GetString()),
-            uptime,
-            DateTimeOffset.UtcNow,
-            force: true,
-            clockLeader: clockLeader,
-            imuHost: imuHost,
-            bandwidth: bandwidth);
-    }
-
-    private void ProcessConfig(JsonElement root)
-    {
-        string? mac = TryReadStringProperty(root, "mac");
-        if (!string.IsNullOrEmpty(mac))
-        {
-            _lastMac = mac;
-        }
-
-        _logger.LogInformation("Node {Port} config: {Config}", _portName, root.GetRawText());
-
-        if (root.TryGetProperty("state", out var stateProp) && stateProp.ValueKind == JsonValueKind.String)
-        {
-            PublishState(ParseConnectionState(stateProp.GetString()), receivedAt: DateTimeOffset.UtcNow);
-        }
-    }
-
-    private void ProcessAck(JsonElement root)
-    {
-        if (!root.TryGetProperty("seq", out var seqProp) || seqProp.ValueKind != JsonValueKind.Number)
-        {
-            return;
-        }
-
-        int seq = seqProp.GetInt32();
-        string? cmd = TryReadStringProperty(root, "cmd");
-        bool success = TryReadBooleanProperty(root, "success") ?? false;
-        string? reason = TryReadStringProperty(root, "reason");
-        string? state = TryReadStringProperty(root, "state");
-        string? mac = TryReadStringProperty(root, "mac");
-
-        if (!string.IsNullOrEmpty(mac))
-        {
-            _lastMac = mac;
-        }
-
-        if (!string.IsNullOrEmpty(state))
-        {
-            PublishState(ParseConnectionState(state), receivedAt: DateTimeOffset.UtcNow);
-        }
-
-        var ack = new Ack(seq, cmd, success, reason, state);
-        if (_pendingAcks.TryRemove(seq, out var tcs))
-        {
-            tcs.TrySetResult(ack);
-        }
-        else
-        {
-            _logger.LogDebug("Received unsolicited ACK for seq {Seq} on {Port}.", seq, _portName);
-        }
-    }
-
-    private void ProcessError(JsonElement root)
-    {
-        string? cmd = TryReadStringProperty(root, "cmd");
-        string? reason = TryReadStringProperty(root, "reason");
-        string? param = TryReadStringProperty(root, "param");
-        string? state = TryReadStringProperty(root, "state");
-        string? mac = TryReadStringProperty(root, "mac");
-
-        _logger.LogWarning(
-            "Node {Port} error: cmd={Cmd}, param={Param}, reason={Reason}",
-            _portName,
-            cmd,
-            param,
-            reason);
-
-        if (!string.IsNullOrEmpty(mac))
-        {
-            _lastMac = mac;
-        }
-
-        if (!string.IsNullOrEmpty(state))
-        {
-            PublishState(ParseConnectionState(state), receivedAt: DateTimeOffset.UtcNow);
-        }
-    }
-
-    private static string? TryReadStringProperty(JsonElement root, string name)
-    {
-        if (root.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.String)
-        {
-            return prop.GetString();
-        }
-
-        return null;
-    }
-
-    private static bool? TryReadBooleanProperty(JsonElement root, string name)
-    {
-        if (root.TryGetProperty(name, out var prop) &&
-            (prop.ValueKind == JsonValueKind.True || prop.ValueKind == JsonValueKind.False))
-        {
-            return prop.GetBoolean();
-        }
-
-        return null;
-    }
-
-    private static long? TryReadInt64Property(JsonElement root, string name)
-    {
-        if (root.TryGetProperty(name, out var prop) &&
-            prop.ValueKind == JsonValueKind.Number &&
-            prop.TryGetInt64(out var value))
-        {
-            return value;
-        }
-
-        return null;
-    }
-
-    private static int? TryReadInt32Property(JsonElement root, string name)
-    {
-        if (root.TryGetProperty(name, out var prop) &&
-            prop.ValueKind == JsonValueKind.Number &&
-            prop.TryGetInt32(out var value))
-        {
-            return value;
-        }
-
-        return null;
-    }
-
-    private void ProcessSpan(ReadOnlySpan<byte> json)
-    {
-        var payload = JsonSerializer.Deserialize<NodePayload>(json, JsonOptions);
-        if (payload is null)
-        {
-            return;
-        }
-
-        payload.ReceivedAt = DateTimeOffset.UtcNow;
-        payload.PortName = _portName;
-
-        if (!string.IsNullOrEmpty(payload.Mac))
-        {
-            _lastMac = payload.Mac;
-        }
-
-        _channel.TryPublish(payload);
-
-        if (!string.IsNullOrEmpty(payload.State))
-        {
-            bool isHeartbeat = string.Equals(payload.Type, "hb", StringComparison.Ordinal);
-            PublishState(
-                ParseConnectionState(payload.State),
-                payload.Timestamp,
-                payload.ReceivedAt,
-                force: isHeartbeat,
-                clockLeader: payload.ClockLeader,
-                imuHost: payload.ImuHost,
-                bandwidth: payload.Bandwidth);
-        }
-    }
-
-    private static NodeConnectionState ParseConnectionState(string? state)
-    {
-        var lowered = state?.ToLowerInvariant();
-
-        return lowered switch
-        {
-            "standby" or "boot" => NodeConnectionState.Standby,
-            "streaming" => NodeConnectionState.Streaming,
-            "diag_sync" => NodeConnectionState.DiagSync,
-            "diag_rf" => NodeConnectionState.DiagRf,
-            null => NodeConnectionState.Disconnected,
-            _ when lowered.StartsWith("diag_") => NodeConnectionState.Assigned,
-            _ => NodeConnectionState.Standby
-        };
-    }
-
-    private void PublishState(
-        NodeConnectionState state,
-        long? uptime = null,
-        DateTimeOffset? receivedAt = null,
-        bool force = false,
-        bool? clockLeader = null,
-        bool? imuHost = null,
-        int? bandwidth = null)
-    {
-        if (!force && _lastState == state)
-        {
-            return;
-        }
-
-        _lastState = state;
-
-        var change = new NodeStateChanged(
-            _portName,
-            _lastMac,
-            state,
-            DateTimeOffset.UtcNow,
-            uptime,
-            receivedAt,
-            clockLeader,
-            imuHost,
-            bandwidth);
-
-        _channel.TryPublishState(change);
     }
 }

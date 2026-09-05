@@ -1,5 +1,6 @@
 using CsiHub.Ingestion.Channels;
 using CsiHub.Ingestion.Pipelines;
+using CsiHub.Ingestion.Pipelines.Handlers;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -22,6 +23,11 @@ public static class CsiIngestionServiceCollectionExtensions
         services.AddOptions<CsiAoaOptions>();
         services.AddSingleton<CsiIngestionChannel>();
         services.AddSingleton<ISerialPortFactory, SerialPortAdapterFactory>();
+        services.AddSingleton<IPayloadHandler, ConfigHandler>();
+        services.AddSingleton<IPayloadHandler, HeartbeatHandler>();
+        services.AddSingleton<IPayloadHandler, AckHandler>();
+        services.AddSingleton<IPayloadHandler, TelemetryHandler>();
+        services.AddSingleton<IPayloadHandler, IgnoredHandler>();
         services.AddSingleton<CsiNodePortManager>();
         services.AddHostedService<CsiIngestionBackgroundService>();
 

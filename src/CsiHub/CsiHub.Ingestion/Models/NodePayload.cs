@@ -26,6 +26,16 @@ public sealed class NodePayload
 
     public string? Reason { get; set; }
 
+    /// <summary>
+    /// Diagnostic test type, present when <see cref="Type"/> is "diag".
+    /// </summary>
+    public string? Test { get; set; }
+
+    /// <summary>
+    /// Command success flag, present when <see cref="Type"/> is "ack".
+    /// </summary>
+    public bool? Success { get; set; }
+
     public bool? ClockLeader { get; set; }
 
     public bool? ImuHost { get; set; }

@@ -26,6 +26,7 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
     private readonly ConcurrentDictionary<(string NodeMac, ulong SrcMac), DateTimeOffset> _lastUpdateAt = new();
     private readonly ConcurrentDictionary<(string NodeMac, ulong SrcMac), (Complex Sample, DateTimeOffset At)> _latestSamples = new();
     private readonly ConcurrentDictionary<ulong, AoaEstimator.AoaResult> _aoaResults = new();
+    private readonly ConcurrentDictionary<string, double[]> _latestImu = new();
     private readonly TimeSpan _pruneInterval = TimeSpan.FromSeconds(30);
     private readonly TimeSpan _baselineMaxAge = TimeSpan.FromMinutes(10);
     private DateTimeOffset _lastPrune = DateTimeOffset.UtcNow;
@@ -85,6 +86,11 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
     public IReadOnlyDictionary<ulong, AoaEstimator.AoaResult> AoaResults => _aoaResults;
 
     /// <summary>
+    /// Latest IMU quaternion per node, stored as [w, x, y, z].
+    /// </summary>
+    public IReadOnlyDictionary<string, double[]> LatestImu => _latestImu;
+
+    /// <summary>
     /// Last status message from the AoA update pipeline, useful for diagnosing
     /// why the MUSIC estimator did not run for a target.
     /// </summary>
@@ -104,6 +110,12 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
                 var rawMac = payload.Mac!;
                 var key = (NodeMac: rawMac, SrcMac: payload.SrcMac ?? 0UL);
                 var sampleKey = (NodeMac: MacAddressFormatter.ToCanonical(rawMac), SrcMac: key.SrcMac);
+
+                if (payload.Type == "imu" && payload.Imu is not null)
+                {
+                    _latestImu[rawMac] = payload.Imu;
+                    continue;
+                }
 
                 if (payload.Type == "csi" && payload.Csi is not null)
                 {
