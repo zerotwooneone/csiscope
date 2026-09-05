@@ -1,139 +1,120 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using CsiHub.Core;
 using CsiHub.Ingestion;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Logging;
 
 namespace CsiHub.Features.Home.Services;
 
 /// <summary>
-/// Persists the user-friendly origin/X-arm/Y-arm geometry assignments to
-/// <c>array_geometry.json</c> and keeps a computed <see cref="CsiAoaOptions"/>
-/// section in the same file so the DSP service can hot-reload it.
+/// Persists the user's origin/X-arm/Y-arm array assignment to
+/// %LocalAppData%/CsiHub/array-geometry.json and derives the sensor-position map
+/// the DSP service uses for AoA. Geometry is user data, so it lives in appdata —
+/// not in a checked-in project config file.
 /// </summary>
-public sealed class HardwareConfigService
+public sealed class HardwareConfigService : IHostedService
 {
-    private readonly IHostEnvironment _environment;
-    private readonly IConfiguration _configuration;
-    private readonly IOptionsMonitor<CsiAoaOptions> _aoaOptions;
+    // Reads both the new camelCase appdata file and the legacy PascalCase project file.
+    private static readonly JsonSerializerOptions ReadOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+    };
+
+    private static readonly JsonSerializerOptions WriteOptions = new()
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+    };
+
+    private readonly string _configDirectory;
+    private readonly string _configFilePath;
+    private readonly CsiDspBackgroundService _dsp;
+    private readonly ILogger<HardwareConfigService> _logger;
+    private readonly SemaphoreSlim _loadGate = new(1, 1);
+    private readonly SemaphoreSlim _fileGate = new(1, 1);
+    private ArrayGeometryOptions _current = new();
+    private bool _loaded;
 
     public HardwareConfigService(
-        IHostEnvironment environment,
-        IConfiguration configuration,
-        IOptionsMonitor<CsiAoaOptions> aoaOptions)
+        CsiDspBackgroundService dsp,
+        ILogger<HardwareConfigService> logger)
     {
-        _environment = environment;
-        _configuration = configuration;
-        _aoaOptions = aoaOptions;
+        var localAppData = Environment.GetFolderPath(
+            Environment.SpecialFolder.LocalApplicationData,
+            Environment.SpecialFolderOption.Create);
+        _configDirectory = Path.Combine(localAppData, "CsiHub");
+        _configFilePath = Path.Combine(_configDirectory, "array-geometry.json");
+        _dsp = dsp;
+        _logger = logger;
     }
 
-    private string FilePath => Path.Combine(_environment.ContentRootPath, "array_geometry.json");
-
     /// <summary>
-    /// Loads the current geometry assignments. If the file does not exist,
-    /// attempts to infer assignments from the current <see cref="CsiAoaOptions"/>.
+    /// Loads the saved geometry and pushes the derived sensor positions to the DSP service.
     /// </summary>
-    public Task<ArrayGeometryOptions> LoadAsync(CancellationToken cancellationToken = default)
+    public async Task StartAsync(CancellationToken cancellationToken)
     {
-        if (!File.Exists(FilePath))
-        {
-            return Task.FromResult(InferFromAoaOptions(_aoaOptions.CurrentValue));
-        }
+        await EnsureLoadedAsync(cancellationToken).ConfigureAwait(false);
+        PushSensorPositions();
+    }
 
-        return LoadFromFileAsync(cancellationToken);
+    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    /// <summary>
+    /// Returns the current array assignment (empty until the user saves one).
+    /// </summary>
+    public async Task<ArrayGeometryOptions> LoadAsync(CancellationToken cancellationToken = default)
+    {
+        await EnsureLoadedAsync(cancellationToken).ConfigureAwait(false);
+        return _current;
     }
 
     /// <summary>
-    /// Saves geometry assignments to disk, computes the derived sensor positions,
-    /// and writes a <see cref="CsiAoaOptions"/> section the DSP service can hot-reload.
+    /// Persists the assignment to appdata and pushes the derived sensor positions
+    /// to the DSP service.
     /// </summary>
     public async Task SaveAsync(ArrayGeometryOptions geometry, CancellationToken cancellationToken = default)
     {
-        var file = await ReadFileAsync(cancellationToken).ConfigureAwait(false);
-
-        file ??= new ConfigFile();
-        file.ArrayGeometry = geometry;
-        file.CsiAoaOptions = MergeWithExistingAoaOptions(geometry, file.CsiAoaOptions ?? _aoaOptions.CurrentValue);
-
-        var json = JsonSerializer.Serialize(file, new JsonSerializerOptions
-        {
-            WriteIndented = true,
-            PropertyNamingPolicy = null,
-        });
-
-        await File.WriteAllTextAsync(FilePath, json, cancellationToken).ConfigureAwait(false);
-
-        if (_configuration is IConfigurationRoot root)
-        {
-            root.Reload();
-        }
+        _current = geometry;
+        _loaded = true;
+        await WriteAsync(geometry, cancellationToken).ConfigureAwait(false);
+        PushSensorPositions();
     }
 
-    private async Task<ArrayGeometryOptions> LoadFromFileAsync(CancellationToken cancellationToken)
+    private async Task EnsureLoadedAsync(CancellationToken cancellationToken)
     {
-        var file = await ReadFileAsync(cancellationToken).ConfigureAwait(false);
-        if (file?.ArrayGeometry is not null)
+        if (_loaded)
         {
-            return file.ArrayGeometry;
+            return;
         }
 
-        return InferFromAoaOptions(file?.CsiAoaOptions ?? _aoaOptions.CurrentValue);
-    }
-
-    private async Task<ConfigFile?> ReadFileAsync(CancellationToken cancellationToken)
-    {
-        if (!File.Exists(FilePath))
+        await _loadGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            return null;
-        }
-
-        var json = await File.ReadAllTextAsync(FilePath, cancellationToken).ConfigureAwait(false);
-        if (string.IsNullOrWhiteSpace(json))
-        {
-            return null;
-        }
-
-        return JsonSerializer.Deserialize<ConfigFile>(json, new JsonSerializerOptions
-        {
-            PropertyNameCaseInsensitive = true,
-            PropertyNamingPolicy = null,
-        });
-    }
-
-    private static CsiAoaOptions MergeWithExistingAoaOptions(ArrayGeometryOptions geometry, CsiAoaOptions? existing)
-    {
-        var merged = existing is null
-            ? new CsiAoaOptions()
-            : new CsiAoaOptions
+            if (_loaded)
             {
-                SensorPositions = new(existing.SensorPositions, StringComparer.OrdinalIgnoreCase),
-                CarrierFrequencyHz = existing.CarrierFrequencyHz,
-                SpeedOfLight = existing.SpeedOfLight,
-                SourceCount = existing.SourceCount,
-                StepDegrees = existing.StepDegrees,
-                SubcarrierIndex = existing.SubcarrierIndex,
-                SampleMaxAge = existing.SampleMaxAge,
-            };
+                return;
+            }
 
-        merged.SensorPositions = BuildSensorPositions(geometry);
-
-        if (merged.CarrierFrequencyHz == 0.0)
-        {
-            merged.CarrierFrequencyHz = new CsiAoaOptions().CarrierFrequencyHz;
+            _current = await ReadAsync(cancellationToken).ConfigureAwait(false) ?? new ArrayGeometryOptions();
+            _loaded = true;
         }
-
-        if (merged.SpeedOfLight == 0.0)
+        finally
         {
-            merged.SpeedOfLight = new CsiAoaOptions().SpeedOfLight;
+            _loadGate.Release();
         }
+    }
 
-        return merged;
+    private Task<ArrayGeometryOptions?> ReadAsync(CancellationToken cancellationToken)
+        => TryReadGeometryAsync(_configFilePath, cancellationToken);
+
+    private void PushSensorPositions()
+    {
+        _dsp.SetSensorPositions(BuildSensorPositions(_current));
     }
 
     private static Dictionary<string, AoaEstimator.SensorPosition> BuildSensorPositions(ArrayGeometryOptions geometry)
@@ -161,34 +142,39 @@ public sealed class HardwareConfigService
         return positions;
     }
 
-    private static ArrayGeometryOptions InferFromAoaOptions(CsiAoaOptions aoa)
+    private async Task<ArrayGeometryOptions?> TryReadGeometryAsync(string path, CancellationToken cancellationToken)
     {
-        var geometry = new ArrayGeometryOptions();
-
-        foreach (var (mac, position) in aoa.SensorPositions)
+        if (!File.Exists(path))
         {
-            if (Math.Abs(position.X) < 1e-9 && Math.Abs(position.Y) < 1e-9)
-            {
-                geometry.OriginMac = mac;
-            }
-            else if (Math.Abs(position.Y) < 1e-9 && position.X > 0)
-            {
-                geometry.XArmMac = mac;
-                geometry.XArmSpacingMeters = position.X;
-            }
-            else if (Math.Abs(position.X) < 1e-9 && position.Y > 0)
-            {
-                geometry.YArmMac = mac;
-                geometry.YArmSpacingMeters = position.Y;
-            }
+            return null;
         }
 
-        return geometry;
+        try
+        {
+            var json = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false);
+            return string.IsNullOrWhiteSpace(json)
+                ? null
+                : JsonSerializer.Deserialize<ArrayGeometryOptions>(json, ReadOptions);
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogWarning(ex, "Could not parse array geometry file {Path}; starting with empty geometry", path);
+            return null;
+        }
     }
 
-    private sealed class ConfigFile
+    private async Task WriteAsync(ArrayGeometryOptions geometry, CancellationToken cancellationToken)
     {
-        public ArrayGeometryOptions? ArrayGeometry { get; set; }
-        public CsiAoaOptions? CsiAoaOptions { get; set; }
+        await _fileGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            Directory.CreateDirectory(_configDirectory);
+            var json = JsonSerializer.Serialize(geometry, WriteOptions);
+            await File.WriteAllTextAsync(_configFilePath, json, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _fileGate.Release();
+        }
     }
 }

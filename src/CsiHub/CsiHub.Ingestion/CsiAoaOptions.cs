@@ -1,19 +1,14 @@
 using System;
-using System.Collections.Generic;
-using CsiHub.Core;
 
 namespace CsiHub.Ingestion;
 
 /// <summary>
-/// Configuration for the distributed MUSIC AoA estimator.
+/// Algorithm tuning for the distributed MUSIC AoA estimator. Sensor positions are
+/// derived at runtime from the user's saved array geometry and pushed into the DSP
+/// service; they are not bound from configuration.
 /// </summary>
 public sealed class CsiAoaOptions
 {
-    /// <summary>
-    /// Node MAC (as reported in payloads) to physical sensor position in meters.
-    /// </summary>
-    public Dictionary<string, AoaEstimator.SensorPosition> SensorPositions { get; set; } = new(StringComparer.OrdinalIgnoreCase);
-
     /// <summary>
     /// Carrier frequency used to compute wavelength. Default is 2.4 GHz.
     /// </summary>

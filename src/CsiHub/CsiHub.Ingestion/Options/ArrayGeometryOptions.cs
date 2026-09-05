@@ -1,9 +1,10 @@
-using System;
-
 namespace CsiHub.Ingestion;
 
 /// <summary>
-/// User-facing geometry assignments for a three-node L-shaped array.
+/// User-facing geometry assignments for a three-node L-shaped array. This is the
+/// single source of truth for the array layout; it is persisted to the user's
+/// local application-data directory, and the sensor-position map used for AoA is
+/// derived from it at runtime.
 /// </summary>
 public sealed class ArrayGeometryOptions
 {
@@ -31,34 +32,4 @@ public sealed class ArrayGeometryOptions
     /// Distance from the origin to the Y-arm node in meters.
     /// </summary>
     public double YArmSpacingMeters { get; set; } = 0.0625;
-
-    /// <summary>
-    /// Maximum age before a per-node CSI sample is ignored for AoA.
-    /// </summary>
-    public TimeSpan SampleMaxAge { get; set; } = TimeSpan.FromSeconds(2.0);
-
-    /// <summary>
-    /// Carrier frequency used to compute wavelength. Default 2.4 GHz.
-    /// </summary>
-    public double CarrierFrequencyHz { get; set; } = 2.4e9;
-
-    /// <summary>
-    /// Speed of light used with <see cref="CarrierFrequencyHz"/>.
-    /// </summary>
-    public double SpeedOfLight { get; set; } = 3.0e8;
-
-    /// <summary>
-    /// MUSIC search step in degrees.
-    /// </summary>
-    public double StepDegrees { get; set; } = 1.0;
-
-    /// <summary>
-    /// Subcarrier index used for the AoA snapshot.
-    /// </summary>
-    public int SubcarrierIndex { get; set; } = 0;
-
-    /// <summary>
-    /// Number of expected signal sources for MUSIC.
-    /// </summary>
-    public int SourceCount { get; set; } = 1;
 }

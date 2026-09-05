@@ -34,3 +34,6 @@ env/
 Thumbs.db
 .idea/
 *.swp
+
+# User-specific array geometry assignment (persisted to %LocalAppData% instead)
+src/CsiHub/CsiHub.Web/array_geometry.json

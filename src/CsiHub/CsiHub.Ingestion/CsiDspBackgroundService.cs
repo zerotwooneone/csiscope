@@ -46,6 +46,8 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
     private const int PhaseHistoryCapacity = 128;
     private readonly ConcurrentDictionary<(string NodeMac, ulong SrcMac), PhaseHistoryBuffer> _phaseHistory = new();
     private bool _subcarrierWarned;
+    private volatile IReadOnlyDictionary<string, AoaEstimator.SensorPosition> _sensorPositions =
+        new Dictionary<string, AoaEstimator.SensorPosition>(StringComparer.OrdinalIgnoreCase);
     private readonly TimeSpan _pruneInterval = TimeSpan.FromSeconds(30);
     private readonly TimeSpan _baselineMaxAge = TimeSpan.FromMinutes(10);
     private DateTimeOffset _lastPrune = DateTimeOffset.UtcNow;
@@ -194,6 +196,16 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
     /// </summary>
     public sealed record PhaseSeries(string NodeMac, string SrcMac, int SubcarrierIndex, double[] Phases);
 
+    /// <summary>
+    /// Replaces the sensor-position map used for AoA. Called by the geometry store
+    /// whenever the user's saved array assignment changes (and once at startup).
+    /// </summary>
+    public void SetSensorPositions(IReadOnlyDictionary<string, AoaEstimator.SensorPosition> positions)
+    {
+        _sensorPositions = positions
+            ?? new Dictionary<string, AoaEstimator.SensorPosition>(StringComparer.OrdinalIgnoreCase);
+    }
+
     private async Task ProcessDspAsync(CancellationToken cancellationToken)
     {
         try
@@ -286,16 +298,17 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
 
     private void TryUpdateAoa(ulong srcMac, DateTimeOffset now, CsiAoaOptions aoaOptions)
     {
-        if (aoaOptions.SensorPositions.Count == 0)
+        var sensorPositions = _sensorPositions;
+        if (sensorPositions.Count == 0)
         {
             LastAoaStatus = "No geometry configured";
             return;
         }
 
-        var sensors = new List<AoaEstimator.SensorPosition>(aoaOptions.SensorPositions.Count);
-        var samples = new List<Complex>(aoaOptions.SensorPositions.Count);
+        var sensors = new List<AoaEstimator.SensorPosition>(sensorPositions.Count);
+        var samples = new List<Complex>(sensorPositions.Count);
 
-        foreach (var (configuredMac, position) in aoaOptions.SensorPositions)
+        foreach (var (configuredMac, position) in sensorPositions)
         {
             var nodeMac = MacAddressFormatter.ToCanonical(configuredMac);
             if (!_latestSamples.TryGetValue((nodeMac, srcMac), out var entry))
