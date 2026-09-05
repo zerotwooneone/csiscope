@@ -7,6 +7,7 @@ bool SyncManager::_isLeader = false;
 volatile bool SyncManager::_pulse = false;
 bool SyncManager::_isrAttached = false;
 bool SyncManager::_outputIsrAttached = false;
+volatile uint32_t SyncManager::_activityCount = 0;
 volatile uint32_t SyncManager::_lastSyncMicros = 0;
 volatile uint32_t SyncManager::_syncedMicros = 0;
 volatile uint64_t SyncManager::_diagPulseCount = 0;
@@ -36,7 +37,8 @@ void SyncManager::begin()
 
 bool SyncManager::apply(bool isLeader)
 {
-    if (_isLeader == isLeader && (isLeader || _isrAttached))
+    // Already in the requested role with its hardware actually attached.
+    if (_isLeader == isLeader && isArmed())
     {
         return true;
     }
@@ -96,40 +98,35 @@ void SyncManager::teardown()
 
 bool SyncManager::startLeader()
 {
-    pinMode(Config::PIN_SYNC_OUT, OUTPUT);
-
-    // Hardware square wave on the sync output pin.
+    // Hardware square wave on the sync output pin. The LEDC API configures the
+    // pin and routes the peripheral signal through the GPIO matrix itself.
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
     if (!ledcAttach(Config::PIN_SYNC_OUT, SyncFrequencyHz, SyncPwmResolution))
     {
         return false;
     }
     ledcWrite(Config::PIN_SYNC_OUT, SyncPwmDuty);
-
-    // The LEDC API sets the pin to pure output. We need the input path enabled
-    // so the same pin can trigger the output-edge ISR on the leader.
-    gpio_set_direction(static_cast<gpio_num_t>(Config::PIN_SYNC_OUT), GPIO_MODE_INPUT_OUTPUT);
-
-    // Attach an ISR to the same output pin so the leader captures the exact
-    // microsecond of the rising edge, giving it parity with followers.
-    attachInterrupt(digitalPinToInterrupt(Config::PIN_SYNC_OUT), onSyncOutputIsr, RISING);
-    _outputIsrAttached = true;
-    return true;
 #else
     ledcSetup(SyncPwmChannel, SyncFrequencyHz, SyncPwmResolution);
     ledcAttachPin(Config::PIN_SYNC_OUT, SyncPwmChannel);
     ledcWrite(SyncPwmChannel, SyncPwmDuty);
+#endif
 
-    // The LEDC API sets the pin to pure output. We need the input path enabled
-    // so the same pin can trigger the output-edge ISR on the leader.
-    gpio_set_direction(static_cast<gpio_num_t>(Config::PIN_SYNC_OUT), GPIO_MODE_INPUT_OUTPUT);
+    // The LEDC setup leaves the pin output-only. Re-enable just the input path
+    // so the pad level can trigger the output-edge ISR below. Do NOT use
+    // gpio_set_direction(GPIO_MODE_INPUT_OUTPUT) here: its output half calls
+    // gpio_output_enable(), which re-routes the pin's output source to the
+    // plain GPIO data register (SIG_GPIO_OUT_IDX) and disconnects the LEDC
+    // signal, leaving the pin flat.
+    gpio_input_enable(static_cast<gpio_num_t>(Config::PIN_SYNC_OUT));
 
     // Attach an ISR to the same output pin so the leader captures the exact
     // microsecond of the rising edge, giving it parity with followers.
+    // attachInterrupt() only sets the interrupt type and enables the input
+    // path; it never touches the output routing.
     attachInterrupt(digitalPinToInterrupt(Config::PIN_SYNC_OUT), onSyncOutputIsr, RISING);
     _outputIsrAttached = true;
     return true;
-#endif
 }
 
 bool SyncManager::startFollower()
@@ -163,6 +160,7 @@ void IRAM_ATTR SyncManager::syncTick(uint32_t isrStart)
     _diagPulseCount++;
     _diagLatencySum += latency;
     _diagLatencySqSum += static_cast<uint64_t>(latency) * latency;
+    _activityCount++;
     interrupts();
 }
 

@@ -30,6 +30,10 @@ private:
     static CRGB _leds[NumLeds];
     static SystemState _currentState;
 
+    // Sync-activity tracking for the STATE_DIAG_SYNC edge-driven blink.
+    static uint32_t _lastActivityCount;
+    static unsigned long _lastActivityMs;
+
     struct Pattern
     {
         CRGB primary;

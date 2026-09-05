@@ -50,6 +50,13 @@ public:
     static uint32_t lastSyncMicros();
 
     /// <summary>
+    /// Free-running count of sync edges seen by the current role's ISR.
+    /// Unlike the diagnostic counters this is never reset, so it can drive a
+    /// human-visible LED indication of live pulse activity.
+    /// </summary>
+    static uint32_t activityCount() { return _activityCount; }
+
+    /// <summary>
     /// Resets the diagnostic counters used during STATE_DIAG_SYNC.
     /// </summary>
     static void resetDiagnostics();
@@ -66,6 +73,9 @@ private:
     static bool _outputIsrAttached;
     static volatile uint32_t _lastSyncMicros;
     static volatile uint32_t _syncedMicros;
+
+    // Free-running edge counter for the LED activity indicator.
+    static volatile uint32_t _activityCount;
 
     // Diagnostic accumulators for STATE_DIAG_SYNC telemetry.
     static volatile uint64_t _diagPulseCount;

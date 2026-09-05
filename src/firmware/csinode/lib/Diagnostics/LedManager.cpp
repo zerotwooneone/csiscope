@@ -4,6 +4,8 @@
 
 CRGB LedManager::_leds[NumLeds];
 SystemState LedManager::_currentState = SystemState::STATE_BOOT;
+uint32_t LedManager::_lastActivityCount = 0;
+unsigned long LedManager::_lastActivityMs = 0;
 
 void LedManager::begin()
 {
@@ -31,6 +33,27 @@ void LedManager::update(unsigned long now)
     if (SyncManager::isLeader())
     {
         pattern.primary = CRGB::Cyan;
+    }
+
+    // In sync-diagnostic mode the LED is driven by real sync edges instead of a
+    // fixed pattern: it toggles every 500 edges (~1 Hz at 1 kHz) so the pulse
+    // train is visible to the human eye. The leader counts its own GPIO4 output
+    // edges, so a dark leader LED means the pin is not actually toggling; a dark
+    // follower LED means no signal is arriving on GPIO7.
+    if (_currentState == SystemState::STATE_DIAG_SYNC)
+    {
+        uint32_t count = SyncManager::activityCount();
+        if (count != _lastActivityCount)
+        {
+            _lastActivityCount = count;
+            _lastActivityMs = now;
+        }
+
+        bool receiving = (now - _lastActivityMs) < 300;
+        bool phase = ((count / 500) & 1) != 0;
+        _leds[0] = (receiving && phase) ? pattern.primary : CRGB::Black;
+        show();
+        return;
     }
 
     if (pattern.pulse)
