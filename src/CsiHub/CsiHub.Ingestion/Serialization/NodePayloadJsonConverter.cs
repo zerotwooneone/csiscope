@@ -141,6 +141,27 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
                     payload.Csi = ReadDoubleArray(ref reader);
                     break;
 
+                case "nz":
+                    if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt32(out var csiNz))
+                    {
+                        payload.CsiNonZero = csiNz;
+                    }
+                    break;
+
+                case "blen":
+                    if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt32(out var csiBufLen))
+                    {
+                        payload.CsiBufLen = csiBufLen;
+                    }
+                    break;
+
+                case "fwi":
+                    if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt32(out var csiFwi))
+                    {
+                        payload.CsiFirstWordInvalid = csiFwi != 0;
+                    }
+                    break;
+
                 case "s":
                 case "seq":
                     if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt32(out var seq))
@@ -493,6 +514,21 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
         {
             writer.WritePropertyName("csi");
             JsonSerializer.Serialize(writer, value.Csi, options);
+        }
+
+        if (value.CsiNonZero.HasValue)
+        {
+            writer.WriteNumber("nz", value.CsiNonZero.Value);
+        }
+
+        if (value.CsiBufLen.HasValue)
+        {
+            writer.WriteNumber("blen", value.CsiBufLen.Value);
+        }
+
+        if (value.CsiFirstWordInvalid.HasValue)
+        {
+            writer.WriteNumber("fwi", value.CsiFirstWordInvalid.Value ? 1 : 0);
         }
 
         if (value.Seq.HasValue)

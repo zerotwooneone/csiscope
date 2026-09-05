@@ -48,6 +48,23 @@ public sealed class NodePayload
     public double[]? Csi { get; set; }
 
     /// <summary>
+    /// Nonzero I/Q byte count the firmware counted in this CSI frame. Lets the
+    /// host distinguish an empty on-node CSI buffer (capture problem) from data
+    /// lost between emit and parse (framing problem).
+    /// </summary>
+    public int? CsiNonZero { get; set; }
+
+    /// <summary>
+    /// Raw CSI buffer length in bytes reported by the firmware.
+    /// </summary>
+    public int? CsiBufLen { get; set; }
+
+    /// <summary>
+    /// Whether the firmware flagged the first CSI buffer word as invalid.
+    /// </summary>
+    public bool? CsiFirstWordInvalid { get; set; }
+
+    /// <summary>
     /// Monotonic sequence number of the CSI payload (per node).
     /// </summary>
     public int? Seq { get; set; }

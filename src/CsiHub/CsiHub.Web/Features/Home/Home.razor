@@ -366,7 +366,10 @@
 <div class="card mb-3">
     <div class="card-header d-flex justify-content-between align-items-center">
         <span>Target AoA Canvas</span>
-        <span class="badge bg-secondary" title="AoA pipeline status">@Dsp.LastAoaStatus</span>
+        <span>
+            <span class="badge bg-secondary" title="AoA pipeline status">@Dsp.LastAoaStatus</span>
+            <span class="badge bg-secondary" title="Zero/live counts: configured subcarrier vs mid-band reference">@Dsp.SubcarrierDiag</span>
+        </span>
     </div>
     <div class="card-body text-center" style="color: var(--bs-body-color)">
         <svg width="360" height="360" viewBox="0 0 360 360">
@@ -398,6 +401,46 @@
                 </circle>
             }
         </svg>
+    </div>
+</div>
+
+<div class="card mb-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span>Raw Subcarrier Phase (per packet)</span>
+        <span class="badge bg-secondary" title="Raw Atan2(Q,I) phase at the locked reference subcarrier, one point per packet. A flat line = stable phase (calibratable); uniform scatter across -pi..+pi = random per-packet offset (coherent AoA infeasible).">ref subcarrier @Dsp.ReferenceIndex</span>
+    </div>
+    <div class="card-body">
+        @{ var phaseSeries = Dsp.GetPhaseSeries(); }
+        @if (phaseSeries.Count == 0)
+        {
+            <p class="text-muted small mb-0">Collecting phase samples — the reference subcarrier locks after ~200 frames.</p>
+        }
+        else
+        {
+            <svg viewBox="0 0 720 220" width="100%" height="220" preserveAspectRatio="none" style="border:1px solid var(--bs-border-color); background:var(--bs-body-bg); color: var(--bs-body-color);">
+                @* Horizontal gridlines at +pi, +pi/2, 0, -pi/2, -pi *@
+                <line x1="34" y1="12"  x2="716" y2="12"  stroke="currentColor" stroke-width="0.5" stroke-dasharray="3 3" opacity="0.4" />
+                <line x1="34" y1="61"  x2="716" y2="61"  stroke="currentColor" stroke-width="0.5" stroke-dasharray="3 3" opacity="0.4" />
+                <line x1="34" y1="110" x2="716" y2="110" stroke="currentColor" stroke-width="0.8" opacity="0.6" />
+                <line x1="34" y1="159" x2="716" y2="159" stroke="currentColor" stroke-width="0.5" stroke-dasharray="3 3" opacity="0.4" />
+                <line x1="34" y1="208" x2="716" y2="208" stroke="currentColor" stroke-width="0.5" stroke-dasharray="3 3" opacity="0.4" />
+                <text x="4" y="16"  font-size="10" fill="currentColor">+π</text>
+                <text x="4" y="65"  font-size="10" fill="currentColor">+π/2</text>
+                <text x="4" y="114" font-size="10" fill="currentColor">0</text>
+                <text x="4" y="163" font-size="10" fill="currentColor">−π/2</text>
+                <text x="4" y="212" font-size="10" fill="currentColor">−π</text>
+                @for (int s = 0; s < phaseSeries.Count; s++)
+                {
+                    <polyline points="@PhasePoints(phaseSeries[s].Phases)" fill="none" stroke="@PhaseColor(s)" stroke-width="1.2" stroke-opacity="0.85" />
+                }
+            </svg>
+            <div class="d-flex flex-wrap gap-3 mt-2 small">
+                @for (int s = 0; s < phaseSeries.Count; s++)
+                {
+                    <span><span style="color:@PhaseColor(s)">&#9632;</span> @phaseSeries[s].NodeMac &larr; @phaseSeries[s].SrcMac</span>
+                }
+            </div>
+        }
     </div>
 </div>
 
@@ -1382,6 +1425,38 @@ else
     }
 
     private sealed record TargetPlacement(string Mac, string X, string Y, string Radius, string Color);
+
+    // ---- Raw subcarrier phase jitter plot ----
+
+    private static readonly string[] PhasePalette =
+        { "#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4", "#42d4f4", "#f032e6", "#bfef45" };
+
+    private static string PhaseColor(int index) => PhasePalette[index % PhasePalette.Length];
+
+    // Maps packet index -> X and phase (-pi..+pi) -> Y inside the 720x220 viewBox.
+    // Plot area: x in [34,716], y in [12,208] with 0-phase at the y=110 midline.
+    private static string PhasePoints(IReadOnlyList<double> phases)
+    {
+        const double Left = 34.0, Right = 716.0, MidY = 110.0, HalfAmp = 98.0;
+        if (phases.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var sb = new System.Text.StringBuilder(phases.Count * 10);
+        double denom = Math.Max(1, phases.Count - 1);
+        for (int i = 0; i < phases.Count; i++)
+        {
+            double x = Left + (i / denom) * (Right - Left);
+            double y = MidY - (phases[i] / Math.PI) * HalfAmp;
+            sb.Append(x.ToString("F1", System.Globalization.CultureInfo.InvariantCulture))
+              .Append(',')
+              .Append(y.ToString("F1", System.Globalization.CultureInfo.InvariantCulture))
+              .Append(' ');
+        }
+
+        return sb.ToString();
+    }
 
     private sealed record SyncDiagnosticRow(string Mac, long PulseCount, double LatencyUs, double JitterUs);
 

@@ -9,7 +9,7 @@
     "CarrierFrequencyHz": 2400000000,
     "SpeedOfLight": 300000000,
     "StepDegrees": 1,
-    "SubcarrierIndex": 0,
+    "SubcarrierIndex": 1,
     "SourceCount": 1
   },
   "CsiAoaOptions": {
@@ -34,7 +34,7 @@
     "SpeedOfLight": 300000000,
     "SourceCount": 1,
     "StepDegrees": 1,
-    "SubcarrierIndex": 0,
+    "SubcarrierIndex": 1,
     "SampleMaxAge": "00:00:02",
     "ConvergenceVarianceMultiplier": 1.5
   }

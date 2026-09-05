@@ -536,8 +536,6 @@ void RfManager::handleCsi(wifi_csi_info_t* info)
 
 void RfManager::emitCsi(wifi_csi_info_t* info, const int8_t* csiBuf, uint16_t csiLen)
 {
-    (void)info;
-
     s_csiDoc.clear();
     s_csiDoc["type"] = "csi";
     s_csiDoc["mac"] = nodeMacAddress;
@@ -558,11 +556,23 @@ void RfManager::emitCsi(wifi_csi_info_t* info, const int8_t* csiBuf, uint16_t cs
 
     // info->buf is int8_t* with interleaved signed I/Q samples.
     // Cast each byte to int so ArduinoJson stores a signed number, not a byte/char.
+    // Count nonzero bytes so the host can tell an empty on-node CSI buffer
+    // (a capture problem) apart from data lost between emit and parse.
+    int nonZero = 0;
     JsonArray c = s_csiDoc["c"].to<JsonArray>();
     for (uint16_t i = 0; i < csiLen; ++i)
     {
-        c.add(static_cast<int>(csiBuf[i]));
+        int v = static_cast<int>(csiBuf[i]);
+        if (v != 0)
+        {
+            nonZero++;
+        }
+        c.add(v);
     }
+
+    s_csiDoc["nz"] = nonZero;                       // nonzero I/Q bytes emitted
+    s_csiDoc["blen"] = static_cast<int>(info->len); // raw CSI buffer length
+    s_csiDoc["fwi"] = info->first_word_invalid ? 1 : 0;
 
     // Build the entire NDJSON line before touching the serial buffer so we can
     // atomically write it and never emit a partial JSON object.
