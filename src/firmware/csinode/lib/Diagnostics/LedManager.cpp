@@ -1,5 +1,6 @@
 #include "LedManager.h"
 #include "config.h"
+#include "SyncManager.h"
 
 CRGB LedManager::_leds[NumLeds];
 SystemState LedManager::_currentState = SystemState::STATE_BOOT;
@@ -22,6 +23,15 @@ void LedManager::setState(SystemState state)
 void LedManager::update(unsigned long now)
 {
     auto pattern = patternForState(_currentState);
+
+    // A node that has armed as clock leader tints its pattern cyan so the role
+    // is visible at a glance: the blink/pulse shape still encodes the state,
+    // the hue encodes the role. Only set after apply() succeeds, so a failed
+    // leader init never shows the tint.
+    if (SyncManager::isLeader())
+    {
+        pattern.primary = CRGB::Cyan;
+    }
 
     if (pattern.pulse)
     {
