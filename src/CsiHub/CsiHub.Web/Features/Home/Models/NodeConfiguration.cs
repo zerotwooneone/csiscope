@@ -7,9 +7,9 @@ public sealed class NodeConfiguration
 {
     public string Mac { get; set; } = string.Empty;
 
-    public bool ClockLeader { get; set; }
+    public bool? ClockLeader { get; set; }
 
-    public bool ImuHost { get; set; }
+    public bool? ImuHost { get; set; }
 
     /// <summary>
     /// Active Wi-Fi bandwidth in MHz (20 or 40).

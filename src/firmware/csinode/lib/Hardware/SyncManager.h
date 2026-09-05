@@ -43,6 +43,16 @@ public:
     /// </summary>
     static uint32_t lastSyncMicros();
 
+    /// <summary>
+    /// Resets the diagnostic counters used during STATE_DIAG_SYNC.
+    /// </summary>
+    static void resetDiagnostics();
+
+    /// <summary>
+    /// Returns a snapshot of the sync diagnostic counters and resets them.
+    /// </summary>
+    static bool getDiagnosticSnapshot(uint32_t& pulseCount, double& latencyUs, double& jitterUs);
+
 private:
     static bool _isLeader;
     static volatile bool _pulse;
@@ -51,10 +61,15 @@ private:
     static volatile uint32_t _lastSyncMicros;
     static volatile uint32_t _syncedMicros;
 
+    // Diagnostic accumulators for STATE_DIAG_SYNC telemetry.
+    static volatile uint64_t _diagPulseCount;
+    static volatile uint64_t _diagLatencySum;
+    static volatile uint64_t _diagLatencySqSum;
+
     // Follower input-edge ISR and leader output-edge ISR both feed syncTick().
     static void IRAM_ATTR onSyncIsr();
     static void IRAM_ATTR onSyncOutputIsr();
-    static void IRAM_ATTR syncTick();
+    static void IRAM_ATTR syncTick(uint32_t isrStart);
 
     static bool startLeader();
     static bool startFollower();

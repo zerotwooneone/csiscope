@@ -246,6 +246,7 @@ void SerialManager::parseAndDispatch(const char* line)
 
         if (strcmp(type, "sync") == 0)
         {
+            SyncManager::resetDiagnostics();
             currentState = SystemState::STATE_DIAG_SYNC;
             HardwareDiagnostics::setLedState(currentState);
             sendAck("diag_test", true, seq);

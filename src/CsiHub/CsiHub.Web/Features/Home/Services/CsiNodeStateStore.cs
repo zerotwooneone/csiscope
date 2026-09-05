@@ -24,6 +24,7 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
     private readonly ILogger<CsiNodeStateStore> _logger;
     private readonly ConcurrentDictionary<string, NodeStateViewModel> _nodes = new();
     private readonly ConcurrentDictionary<string, DateTimeOffset> _lastRestore = new();
+    private readonly ConcurrentDictionary<string, byte> _featuresRestored = new();
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, string>> _activeErrors = new();
     private readonly ConcurrentDictionary<string, HashSet<string>> _unavailableFeatures = new();
     private readonly ConcurrentDictionary<string, Dictionary<int, RfChannelMetrics>> _rfScanResults = new();
@@ -96,6 +97,16 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
             .Where(n => !n.IsDisconnected && !string.IsNullOrWhiteSpace(n.Mac))
             .Select(n => n.Mac!)
             .ToList();
+    }
+
+    /// <summary>
+    /// Marks the saved feature flags as already pushed for a node, so the
+    /// background restore logic does not duplicate a set_features command the
+    /// Blazor UI just sent.
+    /// </summary>
+    public void MarkFeaturesConfigured(string mac)
+    {
+        _featuresRestored[mac] = 0;
     }
 
     /// <summary>
@@ -269,7 +280,9 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
                     }
                 }
 
-                if (state.Mac is not null && ShouldRestore(state, existingConfig))
+                if (state.Mac is not null &&
+                    state.State == NodeConnectionState.Standby &&
+                    ShouldRestore(state, existingConfig))
                 {
                     await TryRestoreFeaturesAsync(state, existingConfig, cancellationToken).ConfigureAwait(false);
                 }
@@ -457,14 +470,18 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
 
         if (mac is not null && configuration is not null)
         {
-            if (state.ClockLeader.HasValue && state.ClockLeader.Value == configuration.ClockLeader)
+            if (state.ClockLeader.HasValue &&
+                configuration.ClockLeader.HasValue &&
+                state.ClockLeader.Value == configuration.ClockLeader.Value)
             {
                 _activeErrors.TryGetValue(mac, out var clockErrors);
                 clockErrors?.TryRemove("clock_leader", out _);
                 RemoveUnavailable(mac, "clock_leader");
             }
 
-            if (state.ImuHost.HasValue && state.ImuHost.Value == configuration.ImuHost)
+            if (state.ImuHost.HasValue &&
+                configuration.ImuHost.HasValue &&
+                state.ImuHost.Value == configuration.ImuHost.Value)
             {
                 _activeErrors.TryGetValue(mac, out var imuErrors);
                 imuErrors?.TryRemove("imu_host", out _);
@@ -522,6 +539,7 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
         _activeErrors.TryRemove(mac, out _);
         _unavailableFeatures.TryRemove(mac, out _);
         _lastRestore.TryRemove(mac, out _);
+        _featuresRestored.TryRemove(mac, out _);
     }
 
     private void RemoveUnavailable(string mac, string feature)
@@ -555,7 +573,7 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
         await PushSetFeaturesAsync(state.PortName, state.Mac, configuration).ConfigureAwait(false);
     }
 
-    private async Task PushSetFeaturesAsync(string portName, string mac, NodeConfiguration configuration)
+    private async Task<bool> PushSetFeaturesAsync(string portName, string mac, NodeConfiguration configuration)
     {
         var json = JsonSerializer.Serialize(new
         {
@@ -572,7 +590,7 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
                 portName);
 
             _lastRestore.TryRemove(mac, out _);
-            return;
+            return false;
         }
 
         _logger.LogInformation(
@@ -582,7 +600,8 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
             configuration.ClockLeader,
             configuration.ImuHost);
 
-        await Task.CompletedTask;
+        _featuresRestored[mac] = 0;
+        return true;
     }
 
     private bool ShouldRestore(NodeStateChanged state, NodeConfiguration? configuration)
@@ -592,13 +611,19 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
             return false;
         }
 
+        bool clockConfigured = configuration.ClockLeader.HasValue;
+        bool imuConfigured = configuration.ImuHost.HasValue;
+
         bool clockMismatch = state.ClockLeader.HasValue && state.ClockLeader.Value != configuration.ClockLeader;
         bool imuMismatch = state.ImuHost.HasValue && state.ImuHost.Value != configuration.ImuHost;
 
         bool clockUnavailable = IsUnavailable(state.Mac, "clock_leader");
         bool imuUnavailable = IsUnavailable(state.Mac, "imu_host");
 
-        return (clockMismatch && !clockUnavailable) || (imuMismatch && !imuUnavailable);
+        bool restored = _featuresRestored.ContainsKey(state.Mac);
+
+        return (clockConfigured && !clockUnavailable && (clockMismatch || !restored)) ||
+               (imuConfigured && !imuUnavailable && (imuMismatch || !restored));
     }
 
     private void AggregateRfScan(RfChannelMetrics metrics)

@@ -1,5 +1,7 @@
 #include "SyncManager.h"
 #include "config.h"
+#include <cmath>
+#include <driver/gpio.h>
 
 bool SyncManager::_isLeader = false;
 volatile bool SyncManager::_pulse = false;
@@ -7,6 +9,9 @@ bool SyncManager::_isrAttached = false;
 bool SyncManager::_outputIsrAttached = false;
 volatile uint32_t SyncManager::_lastSyncMicros = 0;
 volatile uint32_t SyncManager::_syncedMicros = 0;
+volatile uint64_t SyncManager::_diagPulseCount = 0;
+volatile uint64_t SyncManager::_diagLatencySum = 0;
+volatile uint64_t SyncManager::_diagLatencySqSum = 0;
 
 static constexpr uint32_t SyncFrequencyHz = 1000;
 static constexpr uint8_t SyncPwmResolution = 8;
@@ -101,6 +106,10 @@ bool SyncManager::startLeader()
     }
     ledcWrite(Config::PIN_SYNC_OUT, SyncPwmDuty);
 
+    // The LEDC API sets the pin to pure output. We need the input path enabled
+    // so the same pin can trigger the output-edge ISR on the leader.
+    gpio_set_direction(static_cast<gpio_num_t>(Config::PIN_SYNC_OUT), GPIO_MODE_INPUT_OUTPUT);
+
     // Attach an ISR to the same output pin so the leader captures the exact
     // microsecond of the rising edge, giving it parity with followers.
     attachInterrupt(digitalPinToInterrupt(Config::PIN_SYNC_OUT), onSyncOutputIsr, RISING);
@@ -110,6 +119,10 @@ bool SyncManager::startLeader()
     ledcSetup(SyncPwmChannel, SyncFrequencyHz, SyncPwmResolution);
     ledcAttachPin(Config::PIN_SYNC_OUT, SyncPwmChannel);
     ledcWrite(SyncPwmChannel, SyncPwmDuty);
+
+    // The LEDC API sets the pin to pure output. We need the input path enabled
+    // so the same pin can trigger the output-edge ISR on the leader.
+    gpio_set_direction(static_cast<gpio_num_t>(Config::PIN_SYNC_OUT), GPIO_MODE_INPUT_OUTPUT);
 
     // Attach an ISR to the same output pin so the leader captures the exact
     // microsecond of the rising edge, giving it parity with followers.
@@ -138,26 +151,31 @@ bool SyncManager::hasPulse()
     return result;
 }
 
-void IRAM_ATTR SyncManager::syncTick()
+void IRAM_ATTR SyncManager::syncTick(uint32_t isrStart)
 {
     uint32_t now = micros();
+    uint32_t latency = now - isrStart;
 
     noInterrupts();
     _syncedMicros += now - _lastSyncMicros;
     _lastSyncMicros = now;
+
+    _diagPulseCount++;
+    _diagLatencySum += latency;
+    _diagLatencySqSum += static_cast<uint64_t>(latency) * latency;
     interrupts();
 }
 
 void IRAM_ATTR SyncManager::onSyncIsr()
 {
     _pulse = true;
-    syncTick();
+    syncTick(micros());
 }
 
 void IRAM_ATTR SyncManager::onSyncOutputIsr()
 {
     // The leader does not need the pulse flag; it just timestamps its own edge.
-    syncTick();
+    syncTick(micros());
 }
 
 uint32_t SyncManager::syncedMicros()
@@ -177,5 +195,44 @@ uint32_t SyncManager::lastSyncMicros()
     interrupts();
 
     return last;
+}
+
+void SyncManager::resetDiagnostics()
+{
+    noInterrupts();
+    _diagPulseCount = 0;
+    _diagLatencySum = 0;
+    _diagLatencySqSum = 0;
+    interrupts();
+}
+
+bool SyncManager::getDiagnosticSnapshot(uint32_t& pulseCount, double& latencyUs, double& jitterUs)
+{
+    noInterrupts();
+    uint64_t count = _diagPulseCount;
+    uint64_t sum = _diagLatencySum;
+    uint64_t sumSq = _diagLatencySqSum;
+
+    _diagPulseCount = 0;
+    _diagLatencySum = 0;
+    _diagLatencySqSum = 0;
+    interrupts();
+
+    if (count == 0)
+    {
+        pulseCount = 0;
+        latencyUs = 0.0;
+        jitterUs = 0.0;
+        return false;
+    }
+
+    pulseCount = static_cast<uint32_t>(count);
+    latencyUs = static_cast<double>(sum) / static_cast<double>(count);
+
+    double meanSq = static_cast<double>(sumSq) / static_cast<double>(count);
+    double variance = meanSq - (latencyUs * latencyUs);
+    jitterUs = sqrt(variance < 0.0 ? 0.0 : variance);
+
+    return true;
 }
 

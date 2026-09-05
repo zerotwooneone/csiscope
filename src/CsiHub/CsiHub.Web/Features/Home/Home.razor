@@ -103,6 +103,7 @@
                                     <div class="form-check form-switch" @onclick:stopPropagation="true">
                                         <input class="form-check-input" type="checkbox" role="switch" id="clock-@safeId" checked="@IsClockLeader(node)" @onchange="(e) => ToggleClockLeader(node, e)">
                                         <label class="form-check-label" for="clock-@safeId">Clock Leader</label>
+                                        <span class="badge @GetSyncRoleBadgeClass(node)">@GetSyncRoleBadgeText(node)</span>
                                     </div>
                                     @if (node.ActiveErrors.ContainsKey("clock_leader"))
                                     {
@@ -575,8 +576,8 @@ else
         return System.Text.RegularExpressions.Regex.Replace(mac, @"[^a-zA-Z0-9]", "-");
     }
 
-    private bool IsClockLeader(NodeStateViewModel node) => GetConfig(node).ClockLeader;
-    private bool IsImuHost(NodeStateViewModel node) => GetConfig(node).ImuHost;
+    private bool IsClockLeader(NodeStateViewModel node) => GetConfig(node).ClockLeader == true;
+    private bool IsImuHost(NodeStateViewModel node) => GetConfig(node).ImuHost == true;
 
     private async Task ToggleClockLeader(NodeStateViewModel node, ChangeEventArgs e)
     {
@@ -636,6 +637,7 @@ else
         try
         {
             await ConfigService.SetConfigurationAsync(config).ConfigureAwait(false);
+            Store.MarkFeaturesConfigured(node.Mac ?? key);
             _errorMessage = null;
             return true;
         }
@@ -710,6 +712,43 @@ else
     private async Task SendDiagTestToAll(string type)
     {
         var failed = new List<string>();
+
+        // For the sync diagnostic, push the latest saved (or default follower) roles
+        // first so every node actually attaches the sync ISR before entering the test.
+        if (type == "sync")
+        {
+            foreach (var mac in Store.GetConnectedMacs())
+            {
+                if (!Store.TryGetPortName(mac, out var portName) || string.IsNullOrWhiteSpace(portName))
+                {
+                    failed.Add(mac);
+                    continue;
+                }
+
+                if (!ConfigService.TryGetConfiguration(mac, out var configuration) || configuration is null)
+                {
+                    configuration = new NodeConfiguration { Mac = mac };
+                }
+
+                var clockLeader = configuration.ClockLeader ?? false;
+
+                var setFeaturesJson = JsonSerializer.Serialize(new
+                {
+                    cmd = "set_features",
+                    clock_leader = clockLeader,
+                    imu_host = configuration.ImuHost,
+                });
+
+                if (!PortManager.TrySendCommand(portName, setFeaturesJson))
+                {
+                    failed.Add($"set_features on {portName}");
+                    continue;
+                }
+
+                Store.MarkFeaturesConfigured(mac);
+            }
+        }
+
         var json = $"{{\"cmd\":\"diag_test\",\"type\":\"{type}\"}}";
 
         foreach (var mac in Store.GetConnectedMacs())
@@ -727,7 +766,7 @@ else
         }
 
         _errorMessage = failed.Count > 0
-            ? $"Failed to send {type} diag_test to {string.Join(", ", failed)}"
+            ? $"Failed to send {type} test to {string.Join(", ", failed)}"
             : null;
 
         await InvokeAsync(StateHasChanged).ConfigureAwait(false);
@@ -926,6 +965,28 @@ else
 
     private static string GetErrorsTooltip(NodeStateViewModel node)
         => string.Join("; ", node.ActiveErrors.Select(e => $"{e.Key}: {e.Value}"));
+
+    private string GetSyncRoleBadgeText(NodeStateViewModel node)
+    {
+        var config = GetConfig(node);
+        return config.ClockLeader switch
+        {
+            true => "Leader",
+            false => "Follower",
+            _ => "Not set",
+        };
+    }
+
+    private string GetSyncRoleBadgeClass(NodeStateViewModel node)
+    {
+        var config = GetConfig(node);
+        return config.ClockLeader switch
+        {
+            true => "text-bg-success ms-2",
+            false => "text-bg-secondary ms-2",
+            _ => "text-bg-light border ms-2",
+        };
+    }
 
     private static double GetRfBarWidth(RfChannelMetrics metrics, double maxPackets)
     {

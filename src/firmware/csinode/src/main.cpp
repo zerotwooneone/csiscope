@@ -117,6 +117,49 @@ void loop()
     }
     break;
 
+  case SystemState::STATE_DIAG_SYNC:
+  {
+    static unsigned long lastDiagSyncMs = 0;
+    static unsigned long lastDiagHeartbeatMs = 0;
+
+    if (currentMs - lastDiagHeartbeatMs >= Config::HEARTBEAT_INTERVAL_MS)
+    {
+      lastDiagHeartbeatMs = currentMs;
+
+      static JsonDocument hbDoc;
+      hbDoc.clear();
+      hbDoc["type"] = "hb";
+      hbDoc["mac"] = nodeMacAddress;
+      hbDoc["state"] = SerialManager::stateToString(currentState);
+      hbDoc["uptime"] = millis() / 1000;
+      hbDoc["bw"] = Config::CSI_BANDWIDTH;
+      hbDoc["clock_leader"] = SyncManager::isLeader();
+      hbDoc["imu_host"] = ImuManager::isHost();
+
+      SerialFraming::sendFramedJson(hbDoc);
+    }
+
+    if (currentMs - lastDiagSyncMs >= 250)
+    {
+      lastDiagSyncMs = currentMs;
+
+      uint32_t pulseCount = 0;
+      double latencyUs = 0.0;
+      double jitterUs = 0.0;
+      SyncManager::getDiagnosticSnapshot(pulseCount, latencyUs, jitterUs);
+
+      JsonDocument diagDoc;
+      diagDoc["type"] = "diag";
+      diagDoc["mac"] = nodeMacAddress;
+      diagDoc["test"] = "sync";
+      diagDoc["pulse_count"] = pulseCount;
+      diagDoc["latency_us"] = latencyUs;
+      diagDoc["jitter_us"] = jitterUs;
+      SerialFraming::sendFramedJson(diagDoc);
+    }
+    break;
+  }
+
   case SystemState::STATE_DIAG_RF:
     RfManager::update();
     break;
