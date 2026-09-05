@@ -246,6 +246,15 @@ void SerialManager::parseAndDispatch(const char* line)
 
         if (strcmp(type, "sync") == 0)
         {
+            // The sync diagnostic only produces data when the sync hardware is
+            // armed via set_features. Nack instead of entering a state that can
+            // only emit zeroed telemetry.
+            if (!SyncManager::isArmed())
+            {
+                sendAck("diag_test", false, seq, "sync_not_armed");
+                return;
+            }
+
             SyncManager::resetDiagnostics();
             currentState = SystemState::STATE_DIAG_SYNC;
             HardwareDiagnostics::setLedState(currentState);

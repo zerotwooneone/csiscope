@@ -102,66 +102,79 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
         {
             await foreach (var payload in _channel.DspPayloadReader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
             {
-                if (string.IsNullOrWhiteSpace(payload.Mac))
+                // A single malformed payload must not kill the DSP loop; without
+                // this catch the task faults silently and processing stops.
+                try
                 {
-                    continue;
-                }
-
-                var rawMac = payload.Mac!;
-                var key = (NodeMac: rawMac, SrcMac: payload.SrcMac ?? 0UL);
-                var sampleKey = (NodeMac: MacAddressFormatter.ToCanonical(rawMac), SrcMac: key.SrcMac);
-
-                if (payload.Type == "imu" && payload.Imu is not null)
-                {
-                    _latestImu[rawMac] = payload.Imu;
-                    continue;
-                }
-
-                if (payload.Type == "csi" && payload.Csi is not null)
-                {
-                    var aoaOptions = _aoaOptions.CurrentValue;
-                    var csiBaseline = _baselines.GetOrAdd(
-                        key,
-                        _ => new RoomBaseline { Mac = FormatMac(key.SrcMac) });
-
-                    if (!csiBaseline.IsInitialized)
+                    if (string.IsNullOrWhiteSpace(payload.Mac))
                     {
-                        if (payload.Bandwidth.HasValue)
+                        continue;
+                    }
+
+                    var rawMac = payload.Mac!;
+                    var key = (NodeMac: rawMac, SrcMac: payload.SrcMac ?? 0UL);
+                    var sampleKey = (NodeMac: MacAddressFormatter.ToCanonical(rawMac), SrcMac: key.SrcMac);
+
+                    if (payload.Type == "imu" && payload.Imu is not null)
+                    {
+                        _latestImu[rawMac] = payload.Imu;
+                        continue;
+                    }
+
+                    if (payload.Type == "csi" && payload.Csi is not null)
+                    {
+                        var aoaOptions = _aoaOptions.CurrentValue;
+                        var csiBaseline = _baselines.GetOrAdd(
+                            key,
+                            _ => new RoomBaseline { Mac = FormatMac(key.SrcMac) });
+
+                        if (!csiBaseline.IsInitialized)
                         {
+                            if (payload.Bandwidth.HasValue)
+                            {
+                                csiBaseline.Initialize(payload.Bandwidth.Value, RoomBaseline.DefaultWindowSize, payload.Csi.Length);
+                            }
+                            else
+                            {
+                                csiBaseline.InitializeFromLength(payload.Csi.Length, RoomBaseline.DefaultWindowSize);
+                            }
+                        }
+                        else if (payload.Bandwidth.HasValue && csiBaseline.Bandwidth != payload.Bandwidth.Value)
+                        {
+                            // Only reinitialize on a true bandwidth change. Minor null-subcarrier
+                            // stripping is handled by padding/truncating in RoomBaseline.Update.
                             csiBaseline.Initialize(payload.Bandwidth.Value, RoomBaseline.DefaultWindowSize, payload.Csi.Length);
                         }
-                        else
+
+                        csiBaseline.ConvergenceVarianceMultiplier = aoaOptions.ConvergenceVarianceMultiplier;
+
+                        TimeSpan? dt = null;
+                        if (_lastUpdateAt.TryGetValue(key, out var last))
                         {
-                            csiBaseline.InitializeFromLength(payload.Csi.Length, RoomBaseline.DefaultWindowSize);
+                            dt = payload.ReceivedAt - last;
                         }
+
+                        csiBaseline.Update(payload.Csi, dt, RoomBaseline.CsiInputScale);
+                        csiBaseline.LastSeen = payload.ReceivedAt;
+                        _lastUpdateAt[key] = payload.ReceivedAt;
+
+                        _latestSamples[sampleKey] = (GetSubcarrierSample(payload.Csi, aoaOptions.SubcarrierIndex), payload.ReceivedAt);
+                        TryUpdateAoa(key.SrcMac, payload.ReceivedAt, aoaOptions);
                     }
-                    else if (payload.Bandwidth.HasValue && csiBaseline.Bandwidth != payload.Bandwidth.Value)
+
+                    if (DateTimeOffset.UtcNow - _lastPrune > _pruneInterval)
                     {
-                        // Only reinitialize on a true bandwidth change. Minor null-subcarrier
-                        // stripping is handled by padding/truncating in RoomBaseline.Update.
-                        csiBaseline.Initialize(payload.Bandwidth.Value, RoomBaseline.DefaultWindowSize, payload.Csi.Length);
+                        PruneOldBaselines(DateTimeOffset.UtcNow);
+                        _lastPrune = DateTimeOffset.UtcNow;
                     }
-
-                    csiBaseline.ConvergenceVarianceMultiplier = aoaOptions.ConvergenceVarianceMultiplier;
-
-                    TimeSpan? dt = null;
-                    if (_lastUpdateAt.TryGetValue(key, out var last))
-                    {
-                        dt = payload.ReceivedAt - last;
-                    }
-
-                    csiBaseline.Update(payload.Csi, dt, RoomBaseline.CsiInputScale);
-                    csiBaseline.LastSeen = payload.ReceivedAt;
-                    _lastUpdateAt[key] = payload.ReceivedAt;
-
-                    _latestSamples[sampleKey] = (GetSubcarrierSample(payload.Csi, aoaOptions.SubcarrierIndex), payload.ReceivedAt);
-                    TryUpdateAoa(key.SrcMac, payload.ReceivedAt, aoaOptions);
                 }
-
-                if (DateTimeOffset.UtcNow - _lastPrune > _pruneInterval)
+                catch (Exception ex)
                 {
-                    PruneOldBaselines(DateTimeOffset.UtcNow);
-                    _lastPrune = DateTimeOffset.UtcNow;
+                    _logger.LogWarning(
+                        ex,
+                        "Failed to process {Type} payload from {Mac}.",
+                        payload.Type,
+                        payload.Mac ?? "unknown");
                 }
             }
         }

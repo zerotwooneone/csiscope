@@ -412,7 +412,10 @@ public sealed class SerialPipelineReader
 
             if (!_context.HasSeenConfig)
             {
-                if (nodePayload.Type == "config")
+                // Before the first config frame, still allow identity-bearing and
+                // diagnostic frames through so a node that connected before the
+                // host opened the port can recover without a reconnect.
+                if (nodePayload.Type is "config" or "hb" or "boot" or "error")
                 {
                     _dispatcher.Dispatch(nodePayload, span, _context);
                 }

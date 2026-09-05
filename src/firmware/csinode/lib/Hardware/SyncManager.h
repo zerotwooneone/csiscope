@@ -33,6 +33,12 @@ public:
     static bool isLeader() { return _isLeader; }
 
     /// <summary>
+    /// True when the sync hardware for the current role is actually attached:
+    /// the output-edge ISR for a leader, the input-edge ISR for a follower.
+    /// </summary>
+    static bool isArmed() { return _isLeader ? _outputIsrAttached : _isrAttached; }
+
+    /// <summary>
     /// Returns a microsecond timestamp anchored to the first sync pulse.
     /// Safe to call from any context; updates are protected by noInterrupts().
     /// </summary>

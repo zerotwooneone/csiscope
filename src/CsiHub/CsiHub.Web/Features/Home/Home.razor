@@ -2,6 +2,7 @@
 @rendermode InteractiveServer
 @using CsiHub.Features.Home.Services
 @using CsiHub.Ingestion
+@using CsiHub.Ingestion.Pipelines
 @using Microsoft.JSInterop
 @using System.Linq
 @using System.Text.Json
@@ -103,7 +104,11 @@
                                     <div class="form-check form-switch" @onclick:stopPropagation="true">
                                         <input class="form-check-input" type="checkbox" role="switch" id="clock-@safeId" checked="@IsClockLeader(node)" @onchange="(e) => ToggleClockLeader(node, e)">
                                         <label class="form-check-label" for="clock-@safeId">Clock Leader</label>
-                                        <span class="badge @GetSyncRoleBadgeClass(node)">@GetSyncRoleBadgeText(node)</span>
+                                        <span class="badge @GetSyncRoleBadgeClass(node)" title="@GetSyncRoleReportedText(node)">@GetSyncRoleBadgeText(node)</span>
+                                        @if (IsSyncRoleMismatch(node))
+                                        {
+                                            <span class="badge text-bg-warning ms-1" title="Configured role differs from the node's reported role">mismatch</span>
+                                        }
                                     </div>
                                     @if (node.ActiveErrors.ContainsKey("clock_leader"))
                                     {
@@ -628,9 +633,10 @@ else
             imu_host = config.ImuHost,
         });
 
-        if (!PortManager.TrySendCommand(portName, json))
+        var ack = await TrySendCommandAckAsync(portName, json).ConfigureAwait(false);
+        if (ack?.Success != true)
         {
-            _errorMessage = $"Failed to update features for {portName}: channel is closed.";
+            _errorMessage = $"Failed to update features for {portName}: {ack?.Reason ?? "no response"}.";
             return false;
         }
 
@@ -675,9 +681,10 @@ else
                 ? $"{{\"cmd\":\"{cmd}\"}}"
                 : $"{{\"cmd\":\"{cmd}\",\"type\":\"{type}\"}}";
 
-            if (!PortManager.TrySendCommand(portName, json))
+            var ack = await TrySendCommandAckAsync(portName, json).ConfigureAwait(false);
+            if (ack?.Success != true)
             {
-                _errorMessage = $"Failed to send {cmd} to {portName}: channel is closed.";
+                _errorMessage = $"Command {cmd} failed on {portName}: {ack?.Reason ?? "no response"}.";
             }
         }
         finally
@@ -739,9 +746,10 @@ else
                     imu_host = configuration.ImuHost,
                 });
 
-                if (!PortManager.TrySendCommand(portName, setFeaturesJson))
+                var featuresAck = await TrySendCommandAckAsync(portName, setFeaturesJson).ConfigureAwait(false);
+                if (featuresAck?.Success != true)
                 {
-                    failed.Add($"set_features on {portName}");
+                    failed.Add($"set_features on {portName} ({featuresAck?.Reason ?? "no response"})");
                     continue;
                 }
 
@@ -759,9 +767,10 @@ else
                 continue;
             }
 
-            if (!PortManager.TrySendCommand(portName, json))
+            var ack = await TrySendCommandAckAsync(portName, json).ConfigureAwait(false);
+            if (ack?.Success != true)
             {
-                failed.Add(portName);
+                failed.Add($"{portName} ({ack?.Reason ?? "no response"})");
             }
         }
 
@@ -965,6 +974,36 @@ else
 
     private static string GetErrorsTooltip(NodeStateViewModel node)
         => string.Join("; ", node.ActiveErrors.Select(e => $"{e.Key}: {e.Value}"));
+
+    /// <summary>
+    /// Sends a command and waits for the node's ACK, returning null on timeout
+    /// or transport failure instead of throwing.
+    /// </summary>
+    private async Task<Ack?> TrySendCommandAckAsync(string portName, string json)
+    {
+        try
+        {
+            return await PortManager.SendCommandAsync(portName, json).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private static string GetSyncRoleReportedText(NodeStateViewModel node)
+        => node.ClockLeader switch
+        {
+            true => "Node reports: leader",
+            false => "Node reports: follower",
+            _ => "Node has not reported a sync role",
+        };
+
+    private bool IsSyncRoleMismatch(NodeStateViewModel node)
+    {
+        var configured = GetConfig(node).ClockLeader;
+        return configured.HasValue && node.ClockLeader.HasValue && configured.Value != node.ClockLeader.Value;
+    }
 
     private string GetSyncRoleBadgeText(NodeStateViewModel node)
     {

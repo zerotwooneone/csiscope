@@ -4,6 +4,7 @@ using CsiHub.Features.Home.Models;
 using CsiHub.Ingestion;
 using CsiHub.Ingestion.Channels;
 using CsiHub.Ingestion.Models;
+using CsiHub.Ingestion.Pipelines;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -252,48 +253,57 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
         {
             await foreach (var state in _channel.StateReader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
             {
-                var key = state.Mac ?? state.PortName;
-
-                _configurationService.TryGetConfiguration(state.Mac ?? string.Empty, out var existingConfig);
-
-                if (state.Mac is not null && state.State == NodeConnectionState.Disconnected)
+                // A single malformed event must not kill the loop; without this
+                // catch the task faults silently and state updates stop forever.
+                try
                 {
-                    ClearErrors(state.Mac);
-                }
+                    var key = state.Mac ?? state.PortName;
 
-                _nodes.AddOrUpdate(
-                    key,
-                    _ =>
-                    {
-                        var node = new NodeStateViewModel { Key = key };
-                        ApplyConnectionState(node, state, existingConfig);
-                        return node;
-                    },
-                    (_, existing) =>
-                    {
-                        ApplyConnectionState(existing, state, existingConfig);
-                        return existing;
-                    });
+                    _configurationService.TryGetConfiguration(state.Mac ?? string.Empty, out var existingConfig);
 
-                if (state.Mac is not null && state.Bandwidth.HasValue)
-                {
-                    try
+                    if (state.Mac is not null && state.State == NodeConnectionState.Disconnected)
                     {
-                        await _configurationService
-                            .SetBandwidthAsync(state.Mac, state.Bandwidth.Value, cancellationToken)
-                            .ConfigureAwait(false);
+                        ClearErrors(state.Mac);
                     }
-                    catch (Exception ex)
+
+                    _nodes.AddOrUpdate(
+                        key,
+                        _ =>
+                        {
+                            var node = new NodeStateViewModel { Key = key };
+                            ApplyConnectionState(node, state, existingConfig);
+                            return node;
+                        },
+                        (_, existing) =>
+                        {
+                            ApplyConnectionState(existing, state, existingConfig);
+                            return existing;
+                        });
+
+                    if (state.Mac is not null && state.Bandwidth.HasValue)
                     {
-                        _logger.LogWarning(ex, "Failed to persist bandwidth for {Mac}.", state.Mac);
+                        try
+                        {
+                            await _configurationService
+                                .SetBandwidthAsync(state.Mac, state.Bandwidth.Value, cancellationToken)
+                                .ConfigureAwait(false);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "Failed to persist bandwidth for {Mac}.", state.Mac);
+                        }
+                    }
+
+                    if (state.Mac is not null &&
+                        state.State == NodeConnectionState.Standby &&
+                        ShouldRestore(state, existingConfig))
+                    {
+                        await TryRestoreFeaturesAsync(state, existingConfig, cancellationToken).ConfigureAwait(false);
                     }
                 }
-
-                if (state.Mac is not null &&
-                    state.State == NodeConnectionState.Standby &&
-                    ShouldRestore(state, existingConfig))
+                catch (Exception ex)
                 {
-                    await TryRestoreFeaturesAsync(state, existingConfig, cancellationToken).ConfigureAwait(false);
+                    _logger.LogWarning(ex, "Failed to process state change for {Port}.", state.PortName);
                 }
             }
         }
@@ -309,11 +319,17 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
         {
             await foreach (var payload in _channel.StateStorePayloadReader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
             {
-                if (payload.Type == "error")
+                // A single malformed payload must not kill the loop; without this
+                // catch the task faults silently and telemetry stops forever.
+                try
                 {
-                    HandleErrorPayload(payload);
-                    continue;
-                }
+                    // Nacked commands are published by AckHandler so failures are
+                    // visible even when the command was sent fire-and-forget.
+                    if (payload.Type == "error" || (payload.Type == "ack" && payload.Success == false))
+                    {
+                        HandleErrorPayload(payload);
+                        continue;
+                    }
 
                 if (payload.Type == "boot" && !string.IsNullOrWhiteSpace(payload.Mac))
                 {
@@ -370,6 +386,15 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
                             ApplySyncDiagnostics(existing, payload.SyncDiag);
                             return existing;
                         });
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(
+                        ex,
+                        "Failed to process {Type} payload from {Port}.",
+                        payload.Type,
+                        payload.PortName ?? "unknown");
                 }
             }
         }
@@ -465,6 +490,7 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
         {
             "imu_init_failed" => "imu_host",
             "sync_init_failed" => "clock_leader",
+            "sync_not_armed" => "clock_leader",
             _ => null
         };
     }
@@ -610,10 +636,14 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
         }
 
         _lastRestore.AddOrUpdate(state.Mac, now, (_, _) => now);
-        await PushSetFeaturesAsync(state.PortName, state.Mac, configuration).ConfigureAwait(false);
+        await PushSetFeaturesAsync(state.PortName, state.Mac, configuration, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<bool> PushSetFeaturesAsync(string portName, string mac, NodeConfiguration configuration)
+    private async Task<bool> PushSetFeaturesAsync(
+        string portName,
+        string mac,
+        NodeConfiguration configuration,
+        CancellationToken cancellationToken = default)
     {
         var json = JsonSerializer.Serialize(new
         {
@@ -622,12 +652,28 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
             imu_host = configuration.ImuHost,
         });
 
-        if (!_portManager.TrySendCommand(portName, json))
+        Ack? ack;
+        try
+        {
+            ack = await _portManager.SendCommandAsync(portName, json, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "set_features to {Mac} on {Port} failed.", mac, portName);
+            ack = null;
+        }
+
+        if (ack is null || !ack.Success)
         {
             _logger.LogWarning(
-                "Failed to push feature flags to {Mac} on {Port}.",
+                "Failed to push feature flags to {Mac} on {Port}: {Reason}.",
                 mac,
-                portName);
+                portName,
+                ack?.Reason ?? "no response");
 
             _lastRestore.TryRemove(mac, out _);
             return false;

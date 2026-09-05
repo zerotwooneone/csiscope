@@ -47,5 +47,19 @@ public sealed class AckHandler : IPayloadHandler
                 seq,
                 context.PortName);
         }
+
+        // A nacked command is a node-reported failure, not just an unanswered
+        // waiter. Publish it so downstream consumers (state store) can surface
+        // it even when the command was sent fire-and-forget.
+        if (!success)
+        {
+            context.Logger.LogWarning(
+                "Command {Cmd} nacked by {Mac} on {Port}: {Reason}.",
+                cmd ?? "unknown",
+                mac ?? "unknown",
+                reason ?? "unknown");
+
+            context.Channel.TryPublish(payload);
+        }
     }
 }
