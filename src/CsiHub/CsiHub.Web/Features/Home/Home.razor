@@ -358,6 +358,20 @@
             <line x1="180" y1="30" x2="180" y2="330" stroke="currentColor" stroke-width="1" />
             <line x1="30" y1="180" x2="330" y2="180" stroke="currentColor" stroke-width="1" />
             <circle cx="180" cy="180" r="4" fill="currentColor" />
+            @* Static L-shaped antenna array in the world frame (no rotation until IMU
+               integration). MUSIC measures azimuth from +Y, so the Y-arm points up
+               (toward the top of the canvas) and the X-arm points right.
+               Scale: 1 unit = 1 mm; arms are the 62.5 mm half-wavelength baseline. *@
+            <g stroke="#4682B4" stroke-width="4" stroke-linecap="round">
+                <title>Antenna array (62.5 mm baseline)</title>
+                <line x1="180" y1="180" x2="242.5" y2="180" />
+                <line x1="180" y1="180" x2="180" y2="117.5" />
+            </g>
+            <g fill="#4682B4" stroke="var(--bs-body-bg)" stroke-width="1.5">
+                <circle cx="180" cy="180" r="6" />
+                <circle cx="242.5" cy="180" r="6" />
+                <circle cx="180" cy="117.5" r="6" />
+            </g>
             @foreach (var t in GetTargetPlacements())
             {
                 <line x1="180" y1="180" x2="@t.X" y2="@t.Y" stroke="@t.Color" stroke-width="2" />
