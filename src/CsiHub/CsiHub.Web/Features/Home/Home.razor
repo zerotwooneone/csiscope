@@ -299,37 +299,55 @@
 <div class="card mb-3">
     <div class="card-header">Node Geometry Configuration</div>
     <div class="card-body">
-        <div class="row g-3">
-            <div class="col-md-3">
-                <label class="form-label">Origin</label>
-                <select class="form-select" @bind="_geometry.OriginMac">
-                    <option value="">-- select --</option>
-                    @foreach (var mac in GetConnectedMacs())
-                    {
-                        <option value="@mac">@mac</option>
-                    }
-                </select>
+        <p class="text-muted small mb-2">
+            Drag a node onto a mount. Dropping onto an occupied mount swaps them;
+            drag a node back to the tray to unassign it.
+        </p>
+        <div class="d-flex flex-wrap gap-4 align-items-start">
+            <div class="geom-board">
+                <svg class="geom-arms" viewBox="0 0 160 160" aria-hidden="true">
+                    <line x1="32" y1="128" x2="128" y2="128" />
+                    <line x1="32" y1="128" x2="32" y2="32" />
+                </svg>
+                @foreach (var slot in GeometrySlots)
+                {
+                    var slotMac = GetSlotMac(slot.Id);
+                    <div class="geom-slot @(slotMac is null ? "geom-slot-empty" : null) @(_dragOverSlot == slot.Id ? "geom-over" : null)"
+                         style="left:@(slot.Left)px; top:@(slot.Top)px;"
+                         data-geom-drop="true"
+                         @ondragenter="() => _dragOverSlot = slot.Id"
+                         @ondragleave="() => _dragOverSlot = null"
+                         @ondrop="() => OnGeometryDrop(slot.Id)">
+                        @if (slotMac is null)
+                        {
+                            <span class="geom-slot-label">@slot.Label</span>
+                        }
+                        else
+                        {
+                            @NodeChip(slotMac)
+                            <span class="geom-slot-tag">@slot.Label</span>
+                        }
+                    </div>
+                }
             </div>
-            <div class="col-md-3">
-                <label class="form-label">X-Axis</label>
-                <select class="form-select" @bind="_geometry.XArmMac">
-                    <option value="">-- select --</option>
-                    @foreach (var mac in GetConnectedMacs())
-                    {
-                        <option value="@mac">@mac</option>
-                    }
-                </select>
+            @{ var unassigned = GetUnassignedMacs().ToList(); }
+            <div class="geom-tray @(_dragOverTray ? "geom-over" : null)"
+                 data-geom-drop="true"
+                 @ondragenter="() => _dragOverTray = true"
+                 @ondragleave="() => _dragOverTray = false"
+                 @ondrop="OnTrayDrop">
+                <div class="geom-tray-title">Detected nodes</div>
+                @if (unassigned.Count == 0)
+                {
+                    <div class="geom-tray-empty">No unassigned nodes</div>
+                }
+                @foreach (var mac in unassigned)
+                {
+                    @NodeChip(mac)
+                }
             </div>
-            <div class="col-md-3">
-                <label class="form-label">Y-Axis</label>
-                <select class="form-select" @bind="_geometry.YArmMac">
-                    <option value="">-- select --</option>
-                    @foreach (var mac in GetConnectedMacs())
-                    {
-                        <option value="@mac">@mac</option>
-                    }
-                </select>
-            </div>
+        </div>
+        <div class="row g-3 mt-2">
             <div class="col-md-2">
                 <label class="form-label">X spacing (m)</label>
                 <input type="number" step="0.001" class="form-control" @bind="_geometry.XArmSpacingMeters" />
@@ -1188,6 +1206,146 @@ else
             _geometrySaving = false;
             await InvokeAsync(StateHasChanged).ConfigureAwait(false);
         }
+    }
+
+    // ---- Geometry drag-and-drop ----
+
+    private enum GeometrySlot { Origin, XArm, YArm }
+
+    private sealed record GeometrySlotInfo(GeometrySlot Id, string Label, int Left, int Top);
+
+    // Board coordinates are the center of each 64px slot circle inside the
+    // 160x160 board; CSS translate(-50%,-50%) centers the slot on the point.
+    // Layout mirrors the AoA canvas: origin bottom-left, +X right, +Y up.
+    private static readonly GeometrySlotInfo[] GeometrySlots =
+    {
+        new(GeometrySlot.Origin, "Origin", 32, 128),
+        new(GeometrySlot.XArm, "+X", 128, 128),
+        new(GeometrySlot.YArm, "+Y", 32, 32),
+    };
+
+    private string? _draggedMac;
+    private GeometrySlot? _dragOverSlot;
+    private bool _dragOverTray;
+
+    private string? GetSlotMac(GeometrySlot slot) => slot switch
+    {
+        GeometrySlot.Origin => _geometry.OriginMac,
+        GeometrySlot.XArm => _geometry.XArmMac,
+        GeometrySlot.YArm => _geometry.YArmMac,
+        _ => null,
+    };
+
+    private void SetSlotMac(GeometrySlot slot, string? mac)
+    {
+        switch (slot)
+        {
+            case GeometrySlot.Origin: _geometry.OriginMac = mac; break;
+            case GeometrySlot.XArm: _geometry.XArmMac = mac; break;
+            case GeometrySlot.YArm: _geometry.YArmMac = mac; break;
+        }
+    }
+
+    private GeometrySlot? FindSlot(string mac)
+    {
+        foreach (var slot in GeometrySlots)
+        {
+            if (string.Equals(GetSlotMac(slot.Id), mac, StringComparison.OrdinalIgnoreCase))
+            {
+                return slot.Id;
+            }
+        }
+
+        return null;
+    }
+
+    private IEnumerable<string> GetUnassignedMacs()
+    {
+        return GetConnectedMacs().Where(m => FindSlot(m) is null);
+    }
+
+    private bool IsConnected(string mac)
+    {
+        return GetConnectedMacs().Contains(mac, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private string? GetPortForMac(string mac)
+    {
+        if (Store.TryGetPortName(mac, out var port) && !string.IsNullOrWhiteSpace(port))
+        {
+            return port;
+        }
+
+        // Saved MACs can differ in case from live MAC keys; fall back to a
+        // case-insensitive scan so the chip still shows its COM port.
+        return Store.Nodes.Values
+            .FirstOrDefault(n => string.Equals(n.Mac, mac, StringComparison.OrdinalIgnoreCase))
+            ?.PortName;
+    }
+
+    private static string MacLast4(string mac)
+    {
+        var hex = mac.Replace(":", string.Empty).Replace("-", string.Empty);
+        return hex.Length > 4 ? hex[^4..].ToUpperInvariant() : hex.ToUpperInvariant();
+    }
+
+    private void OnGeometryDrop(GeometrySlot target)
+    {
+        if (_draggedMac is null)
+        {
+            return;
+        }
+
+        var source = FindSlot(_draggedMac);
+        if (source != target)
+        {
+            var displaced = GetSlotMac(target);
+
+            // Swap: the target's occupant moves to the dragged node's old slot.
+            // When the drag came from the tray there is no old slot, so the
+            // displaced node simply becomes unassigned.
+            if (source is not null)
+            {
+                SetSlotMac(source.Value, displaced);
+            }
+
+            SetSlotMac(target, _draggedMac);
+        }
+
+        OnGeometryDragEnd();
+    }
+
+    private void OnTrayDrop()
+    {
+        if (_draggedMac is not null && FindSlot(_draggedMac) is { } source)
+        {
+            SetSlotMac(source, null);
+        }
+
+        OnGeometryDragEnd();
+    }
+
+    private void OnGeometryDragEnd()
+    {
+        _draggedMac = null;
+        _dragOverSlot = null;
+        _dragOverTray = false;
+    }
+
+    private RenderFragment NodeChip(string mac)
+    {
+        var port = GetPortForMac(mac);
+        var offline = IsConnected(mac) ? null : "geom-chip-off";
+        return@<div class="geom-chip @offline"
+                   style="background-color:@(mac.ToMacColor())"
+                   draggable="true"
+                   data-geom-drag="@mac"
+                   title="@mac"
+                   @ondragstart="() => _draggedMac = mac"
+                   @ondragend="OnGeometryDragEnd">
+                    <span class="geom-chip-mac">@MacLast4(mac)</span>
+                    <span class="geom-chip-port">@(port ?? "?")</span>
+                </div>;
     }
 
     private IEnumerable<TargetPlacement> GetTargetPlacements()
