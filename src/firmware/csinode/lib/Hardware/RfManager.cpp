@@ -8,6 +8,7 @@
 #include <ArduinoJson.h>
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -20,6 +21,12 @@ bool RfManager::_started = false;
 bool RfManager::_sweepActive = false;
 bool RfManager::_singleChannelActive = false;
 bool RfManager::_passiveActive = false;
+bool RfManager::_chanDiagActive = false;
+uint8_t RfManager::_chanDiagChannel = 0;
+unsigned long RfManager::_chanDiagStartMs = 0;
+uint32_t RfManager::_chanDiagTotalPkts = 0;
+std::array<RfManager::ChanDiagMac, RfManager::ChanDiagMacTableSize> RfManager::_chanDiagMacs = {};
+size_t RfManager::_chanDiagMacCount = 0;
 uint8_t RfManager::_singleChannel = 0;
 uint8_t RfManager::_passiveChannel = 0;
 uint8_t RfManager::_passiveBw = 0;
@@ -42,6 +49,13 @@ static char s_csiJsonBuffer[CsiJsonBufferSize];
 // Separate frame buffer that holds the length-prefixed header + CRC wrapper.
 static uint8_t s_csiFrameBuffer[CsiJsonBufferSize + 8];
 
+// Channel-verification diag frames can approach 1 KiB with a full MAC table,
+// which exceeds the sendFramedJson payload buffer, so they are serialized and
+// framed through dedicated buffers like the CSI path.
+constexpr size_t ChanDiagJsonBufferSize = 1536;
+static char s_chanDiagJsonBuffer[ChanDiagJsonBufferSize];
+static uint8_t s_chanDiagFrameBuffer[ChanDiagJsonBufferSize + 8];
+
 // CSI receive callback registered with esp_wifi_set_csi_rx_cb.
 // Defined near the bottom of this file with C linkage.
 
@@ -54,6 +68,7 @@ void RfManager::begin()
     _sweepActive = false;
     _singleChannelActive = false;
     _passiveActive = false;
+    _chanDiagActive = false;
     _singleChannel = 0;
     _passiveChannel = 0;
     _passiveBw = 0;
@@ -66,6 +81,24 @@ void RfManager::begin()
 
 void RfManager::update()
 {
+    if (_chanDiagActive)
+    {
+        if (millis() - _chanDiagStartMs < _dwellMs)
+        {
+            return;
+        }
+
+        // Mute reception before reading the shared accumulators, emit the
+        // dwell summary, then hand control back to standby.
+        esp_wifi_set_promiscuous(false);
+        esp_wifi_set_csi(false);
+        _chanDiagActive = false;
+        emitChanDiag();
+        currentState = SystemState::STATE_STANDBY;
+        HardwareDiagnostics::setLedState(currentState);
+        return;
+    }
+
     if (!_sweepActive && !_singleChannelActive)
     {
         return;
@@ -108,10 +141,13 @@ void RfManager::startSweep(uint16_t dwellMs)
 {
     _sweepActive = true;
     _singleChannelActive = false;
+    _chanDiagActive = false;
     _dwellMs = dwellMs;
     _channelIndex = 0;
 
     ensureStarted();
+    // A preempted chan diag may have left CSI capture on; sweeps never use it.
+    esp_wifi_set_csi(false);
     setChannel(_channels[0]);
     resetMetrics(_channels[0]);
     esp_wifi_set_promiscuous(true);
@@ -121,10 +157,13 @@ void RfManager::startSingleChannelScan(uint8_t channel, uint16_t dwellMs)
 {
     _sweepActive = false;
     _singleChannelActive = true;
+    _chanDiagActive = false;
     _singleChannel = channel;
     _dwellMs = dwellMs;
 
     ensureStarted();
+    // A preempted chan diag may have left CSI capture on; scans never use it.
+    esp_wifi_set_csi(false);
     setChannel(channel);
     resetMetrics(channel);
     esp_wifi_set_promiscuous(true);
@@ -135,6 +174,7 @@ void RfManager::stop()
     _sweepActive = false;
     _singleChannelActive = false;
     _passiveActive = false;
+    _chanDiagActive = false;
     if (_started)
     {
         esp_wifi_set_csi(false);
@@ -142,10 +182,10 @@ void RfManager::stop()
     }
 }
 
-void RfManager::setChannel(uint8_t channel)
+bool RfManager::setChannel(uint8_t channel)
 {
     ensureStarted();
-    esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+    return esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE) == ESP_OK;
 }
 
 bool RfManager::startPassive(uint8_t channel, uint8_t bw, const char* const* macFilters, size_t count)
@@ -153,6 +193,7 @@ bool RfManager::startPassive(uint8_t channel, uint8_t bw, const char* const* mac
     _sweepActive = false;
     _singleChannelActive = false;
     _passiveActive = true;
+    _chanDiagActive = false;
     _passiveChannel = channel;
     _passiveBw = bw;
     _passiveTargetMacs = {};
@@ -195,10 +236,66 @@ bool RfManager::startPassive(uint8_t channel, uint8_t bw, const char* const* mac
 
     // 40 MHz passive sniffing uses the channel above as the secondary channel.
     wifi_second_chan_t second = (bw >= 40) ? WIFI_SECOND_CHAN_ABOVE : WIFI_SECOND_CHAN_NONE;
-    esp_wifi_set_channel(channel, second);
+
+    // Mute promiscuous reception around the retune so frames captured on the
+    // previous channel cannot be delivered stamped as the new one. The CSI
+    // configuration persists across this toggle and is not re-initialised.
+    esp_wifi_set_promiscuous(false);
+    if (esp_wifi_set_channel(channel, second) != ESP_OK)
+    {
+        esp_wifi_set_csi(false);
+        _passiveActive = false;
+        SerialFraming::sendFramedText("rf: set_channel failed");
+        return false;
+    }
     esp_wifi_set_promiscuous(true);
 
     return true;
+}
+
+void RfManager::startChanDiag(uint8_t channel, uint16_t dwellMs)
+{
+    _sweepActive = false;
+    _singleChannelActive = false;
+    _passiveActive = false;
+    _chanDiagActive = false;
+    _chanDiagChannel = channel;
+    _chanDiagTotalPkts = 0;
+    _chanDiagMacs = {};
+    _chanDiagMacCount = 0;
+    _dwellMs = dwellMs;
+
+    ensureStarted();
+
+    // Same CSI configuration as passive streaming so amplitude statistics
+    // reflect what a real baseline would see on this channel.
+    wifi_csi_config_t csiConfig = {};
+    csiConfig.lltf_en = true;
+    csiConfig.htltf_en = true;
+    csiConfig.stbc_htltf2_en = true;
+    csiConfig.ltf_merge_en = true;
+    csiConfig.channel_filter_en = true;
+    csiConfig.manu_scale = false;
+    csiConfig.shift = 0;
+    csiConfig.dump_ack_en = false;
+    esp_wifi_set_csi_config(&csiConfig);
+    esp_wifi_set_csi(true);
+
+    // Mute reception around the retune, then arm the diagnostic. The dwell
+    // clock starts only after the radio is actually listening on-channel.
+    esp_wifi_set_promiscuous(false);
+    if (!setChannel(channel))
+    {
+        esp_wifi_set_csi(false);
+        SerialFraming::sendFramedText("chan_diag: set_channel failed");
+        currentState = SystemState::STATE_STANDBY;
+        HardwareDiagnostics::setLedState(currentState);
+        return;
+    }
+
+    _chanDiagActive = true;
+    _chanDiagStartMs = millis();
+    esp_wifi_set_promiscuous(true);
 }
 
 void RfManager::ensureStarted()
@@ -273,7 +370,18 @@ void RfManager::promiscuousCallback(void* buf, wifi_promiscuous_pkt_type_t type)
 {
     (void)type;
 
-    if ((!_sweepActive && !_singleChannelActive) || buf == nullptr)
+    if (buf == nullptr)
+    {
+        return;
+    }
+
+    if (_chanDiagActive)
+    {
+        accumulateChanDiagPacket(static_cast<wifi_promiscuous_pkt_t*>(buf));
+        return;
+    }
+
+    if (!_sweepActive && !_singleChannelActive)
     {
         return;
     }
@@ -473,6 +581,186 @@ bool RfManager::matchesAnyTargetMac(const uint8_t* mac)
     return false;
 }
 
+RfManager::ChanDiagMac* RfManager::findOrAddChanDiagMac(const uint8_t* mac)
+{
+    if (mac == nullptr)
+    {
+        return nullptr;
+    }
+
+    for (size_t i = 0; i < _chanDiagMacCount; ++i)
+    {
+        if (std::memcmp(_chanDiagMacs[i].mac.data(), mac, 6) == 0)
+        {
+            return &_chanDiagMacs[i];
+        }
+    }
+
+    if (_chanDiagMacCount >= ChanDiagMacTableSize)
+    {
+        return nullptr;
+    }
+
+    ChanDiagMac& m = _chanDiagMacs[_chanDiagMacCount++];
+    std::memcpy(m.mac.data(), mac, 6);
+    m.packets = 0;
+    m.rssiSum = 0;
+    m.rssiSqSum = 0;
+    m.ampSum = 0.0;
+    m.ampSqSum = 0.0;
+    m.ampSamples = 0;
+    return &m;
+}
+
+void RfManager::accumulateChanDiagPacket(wifi_promiscuous_pkt_t* pkt)
+{
+    // Ghost filter: only count packets the hardware received on the diag channel.
+    if (pkt->rx_ctrl.channel != _chanDiagChannel)
+    {
+        return;
+    }
+
+    _chanDiagTotalPkts++;
+
+    // Need at least the Address2 field to attribute the frame to a transmitter.
+    if (pkt->rx_ctrl.sig_len < 16)
+    {
+        return;
+    }
+
+    const uint8_t* payload = pkt->payload;
+    uint8_t frameType = payload[0] & 0x0C;
+
+    // Skip control frames; they do not have a standard Address2 transmitter field.
+    if (frameType == 0x04)
+    {
+        return;
+    }
+
+    ChanDiagMac* m = findOrAddChanDiagMac(payload + 10);
+    if (m == nullptr)
+    {
+        return;
+    }
+
+    int32_t rssi = static_cast<int32_t>(pkt->rx_ctrl.rssi);
+    m->packets++;
+    m->rssiSum += rssi;
+    m->rssiSqSum += static_cast<uint64_t>(rssi * rssi);
+}
+
+void RfManager::accumulateChanDiagCsi(wifi_csi_info_t* info)
+{
+    const int8_t* csiBuf = info->buf;
+    uint16_t csiLen = info->len;
+
+    if (info->first_word_invalid)
+    {
+        if (csiLen <= 4)
+        {
+            return;
+        }
+        csiBuf += 4;
+        csiLen -= 4;
+    }
+
+    ChanDiagMac* m = findOrAddChanDiagMac(info->mac);
+    if (m == nullptr)
+    {
+        return;
+    }
+
+    // info->buf holds interleaved signed I/Q bytes; accumulate the scalar
+    // amplitude A = sqrt(I^2 + Q^2) per subcarrier pair into a sum/sum-of-
+    // squares accumulator so emitChanDiag can report amplitude variance.
+    for (uint16_t i = 0; i + 1 < csiLen; i += 2)
+    {
+        int32_t q = static_cast<int32_t>(csiBuf[i]);
+        int32_t in = static_cast<int32_t>(csiBuf[i + 1]);
+        double amp = std::sqrt(static_cast<double>(q * q + in * in));
+        m->ampSum += amp;
+        m->ampSqSum += amp * amp;
+        m->ampSamples++;
+    }
+}
+
+void RfManager::emitChanDiag()
+{
+    unsigned long elapsed = millis() - _chanDiagStartMs;
+
+    static JsonDocument doc;
+    doc.clear();
+    doc["type"] = "diag";
+    doc["test"] = "chan";
+    doc["mac"] = nodeMacAddress;
+    doc["ch"] = _chanDiagChannel;
+    doc["duration_ms"] = elapsed;
+    doc["total_pkts"] = _chanDiagTotalPkts;
+
+    // Sort indices into the fixed table by packet count, like addTopMacs.
+    std::array<size_t, ChanDiagMacTableSize> indices = {};
+    for (size_t i = 0; i < _chanDiagMacCount; ++i)
+    {
+        indices[i] = i;
+    }
+
+    const auto& table = _chanDiagMacs;
+    std::sort(indices.begin(), indices.begin() + _chanDiagMacCount,
+              [&table](size_t a, size_t b) {
+                  return table[a].packets > table[b].packets;
+              });
+
+    JsonArray macs = doc["macs"].to<JsonArray>();
+    for (size_t i = 0; i < _chanDiagMacCount; ++i)
+    {
+        const ChanDiagMac& m = table[indices[i]];
+
+        double rssiAvg = m.packets > 0
+            ? static_cast<double>(m.rssiSum) / static_cast<double>(m.packets)
+            : 0.0;
+        double rssiVar = 0.0;
+        if (m.packets > 0)
+        {
+            double meanSq = static_cast<double>(m.rssiSqSum) / static_cast<double>(m.packets);
+            rssiVar = meanSq - (rssiAvg * rssiAvg);
+            if (rssiVar < 0.0)
+            {
+                rssiVar = 0.0;
+            }
+        }
+
+        double ampVar = 0.0;
+        if (m.ampSamples > 0)
+        {
+            double ampMean = m.ampSum / static_cast<double>(m.ampSamples);
+            ampVar = (m.ampSqSum / static_cast<double>(m.ampSamples)) - (ampMean * ampMean);
+            if (ampVar < 0.0)
+            {
+                ampVar = 0.0;
+            }
+        }
+
+        JsonObject obj = macs.add<JsonObject>();
+        obj["src"] = formatMac(m.mac);
+        obj["pkts"] = m.packets;
+        obj["rssi_avg"] = rssiAvg;
+        obj["rssi_var"] = rssiVar;
+        obj["amp_var"] = ampVar;
+    }
+
+    // Serialize into the dedicated buffer; a full MAC table can exceed the
+    // 1 KiB payload limit inside sendFramedJson.
+    size_t written = serializeJson(doc, s_chanDiagJsonBuffer, ChanDiagJsonBufferSize - 1);
+    if (written == 0 || written >= ChanDiagJsonBufferSize - 1)
+    {
+        return;
+    }
+
+    s_chanDiagJsonBuffer[written] = '\n';
+    SerialFraming::sendFramed(reinterpret_cast<const uint8_t*>(s_chanDiagJsonBuffer),
+                              written + 1, s_chanDiagFrameBuffer, sizeof(s_chanDiagFrameBuffer));
+}
+
 void RfManager::prewarmCsiDoc()
 {
     s_csiDoc.clear();
@@ -500,13 +788,32 @@ extern "C" void csiRxCallback(void* ctx, wifi_csi_info_t* info)
 
 void RfManager::handleCsi(wifi_csi_info_t* info)
 {
+    if (info == nullptr || info->buf == nullptr || info->len == 0)
+    {
+        return;
+    }
+
+    if (_chanDiagActive)
+    {
+        // Ghost filter: drop frames the radio captured before the retune.
+        if (info->rx_ctrl.channel != _chanDiagChannel)
+        {
+            return;
+        }
+        accumulateChanDiagCsi(info);
+        return;
+    }
+
     // Drop frames unless the system is actively streaming and passive mode is on.
     if (!_passiveActive || currentState != SystemState::STATE_STREAMING)
     {
         return;
     }
 
-    if (info == nullptr || info->buf == nullptr || info->len == 0)
+    // Ghost filter: the hardware-stamped channel must match the channel the
+    // radio was told to tune to. Frames queued across a mid-stream hop are
+    // discarded here instead of contaminating the new channel's baseline.
+    if (info->rx_ctrl.channel != _passiveChannel)
     {
         return;
     }
@@ -548,6 +855,10 @@ void RfManager::emitCsi(wifi_csi_info_t* info, const int8_t* csiBuf, uint16_t cs
         srcMac = (srcMac << 8) | static_cast<uint8_t>(info->mac[i]);
     }
     s_csiDoc["src"] = srcMac;
+
+    // Hardware-stamped receive channel; lets the host key baselines by
+    // (node, src, channel) and verify the ghost filter is working.
+    s_csiDoc["ch"] = static_cast<int>(info->rx_ctrl.channel);
 
     s_csiDoc["seq"] = _csiSeq++;
     s_csiDoc["t"] = SyncManager::syncedMicros();

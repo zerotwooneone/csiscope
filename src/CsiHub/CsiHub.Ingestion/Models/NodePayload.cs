@@ -79,6 +79,12 @@ public sealed class NodePayload
     /// </summary>
     public ulong? SrcMac { get; set; }
 
+    /// <summary>
+    /// Hardware-stamped receive channel on CSI payloads (1-13). Lets the host
+    /// key baselines by (node, source, channel) and detect ghost frames.
+    /// </summary>
+    public int? Channel { get; set; }
+
     public double[]? Imu { get; set; }
 
     /// <summary>
@@ -90,6 +96,11 @@ public sealed class NodePayload
     /// Sync diagnostic metrics, present when <see cref="Type"/> is "diag" and the test is "sync".
     /// </summary>
     public SyncDiagnosticMetrics? SyncDiag { get; set; }
+
+    /// <summary>
+    /// Channel verification metrics, present when <see cref="Type"/> is "diag" and the test is "chan".
+    /// </summary>
+    public ChanDiagMetrics? ChanDiag { get; set; }
 
     /// <summary>
     /// The host-local time the payload was received.

@@ -33,6 +33,18 @@ public sealed class RfRecommendation
     public RfChannelAggregate? Aggregate { get; set; }
 
     /// <summary>
+    /// Raw CSI amplitude variance of the recommended MAC, or null when the
+    /// channel was measured by a legacy rf_scan dwell without CSI data.
+    /// </summary>
+    public double? BestMacAmpVar { get; set; }
+
+    /// <summary>
+    /// The score multiplier derived from <see cref="BestMacAmpVar"/>
+    /// (1 / (1 + amp_var)); 1.0 when no amplitude data was available.
+    /// </summary>
+    public double BestMacAmpFactor { get; set; } = 1.0;
+
+    /// <summary>
     /// All top MACs observed on the recommended channel.
     /// </summary>
     public IReadOnlyCollection<RfMacMetrics> TopMacs { get; set; } = Array.Empty<RfMacMetrics>();

@@ -161,6 +161,7 @@ void loop()
   }
 
   case SystemState::STATE_DIAG_RF:
+  case SystemState::STATE_DIAG_CHAN:
     RfManager::update();
     break;
 

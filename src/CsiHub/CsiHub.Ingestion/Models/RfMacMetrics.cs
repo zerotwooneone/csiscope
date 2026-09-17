@@ -39,4 +39,10 @@ public sealed class RfMacMetrics
     /// Total time, in milliseconds, over which this transmitter's packets were observed.
     /// </summary>
     public int DurationMs { get; set; }
+
+    /// <summary>
+    /// CSI scalar amplitude variance from a channel verification diagnostic.
+    /// Null for plain rf_scan dwells, which carry no CSI amplitude data.
+    /// </summary>
+    public double? AmpVar { get; set; }
 }

@@ -25,6 +25,13 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
         double? imuY = null;
         double? imuZ = null;
 
+        // Buffered scalars shared by rf_scan and diag/chan payloads. They are
+        // routed post-loop once payload.Test is known, so a diag/chan frame
+        // never spawns a spurious Rf object.
+        int? channel = null;
+        int? durationMs = null;
+        long? totalPkts = null;
+
         while (reader.Read())
         {
             if (reader.TokenType == JsonTokenType.EndObject)
@@ -220,7 +227,7 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
                 case "ch":
                     if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt32(out var ch))
                     {
-                        EnsureRf(payload).Channel = ch;
+                        channel = ch;
                     }
                     break;
 
@@ -260,9 +267,16 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
                     break;
 
                 case "duration_ms":
-                    if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt32(out var durationMs))
+                    if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt32(out var durationMsValue))
                     {
-                        EnsureRf(payload).DurationMs = durationMs;
+                        durationMs = durationMsValue;
+                    }
+                    break;
+
+                case "total_pkts":
+                    if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt64(out var totalPktsValue))
+                    {
+                        totalPkts = totalPktsValue;
                     }
                     break;
 
@@ -270,9 +284,51 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
                     EnsureRf(payload).TopMacs = ReadTopMacs(ref reader);
                     break;
 
+                case "macs":
+                    EnsureChanDiag(payload).Macs = ReadChanDiagMacs(ref reader);
+                    break;
+
                 default:
                     reader.Skip();
                     break;
+            }
+        }
+
+        // Route the buffered scalars: diag/chan frames own them when the test
+        // name matches; everything else keeps the legacy rf_scan behavior.
+        if (payload.Test == "chan")
+        {
+            var chanDiag = EnsureChanDiag(payload);
+            if (channel.HasValue)
+            {
+                chanDiag.Channel = channel.Value;
+            }
+            if (durationMs.HasValue)
+            {
+                chanDiag.DurationMs = durationMs.Value;
+            }
+            if (totalPkts.HasValue)
+            {
+                chanDiag.TotalPackets = totalPkts.Value;
+            }
+        }
+        else
+        {
+            if (channel.HasValue)
+            {
+                payload.Channel = channel;
+                if (payload.Rf is not null)
+                {
+                    payload.Rf.Channel = channel.Value;
+                }
+                else if (payload.Type == "rf_scan")
+                {
+                    EnsureRf(payload).Channel = channel.Value;
+                }
+            }
+            if (durationMs.HasValue && payload.Rf is not null)
+            {
+                payload.Rf.DurationMs = durationMs.Value;
             }
         }
 
@@ -303,6 +359,11 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
     private static SyncDiagnosticMetrics EnsureSyncDiag(NodePayload payload)
     {
         return payload.SyncDiag ??= new SyncDiagnosticMetrics();
+    }
+
+    private static ChanDiagMetrics EnsureChanDiag(NodePayload payload)
+    {
+        return payload.ChanDiag ??= new ChanDiagMetrics();
     }
 
     private static List<RfMacMetrics>? ReadTopMacs(ref Utf8JsonReader reader)
@@ -390,6 +451,87 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
         }
 
         return topMacs;
+    }
+
+    private static List<ChanDiagMacMetrics>? ReadChanDiagMacs(ref Utf8JsonReader reader)
+    {
+        if (reader.TokenType != JsonTokenType.StartArray)
+        {
+            return null;
+        }
+
+        var macs = new List<ChanDiagMacMetrics>();
+
+        while (reader.Read())
+        {
+            if (reader.TokenType == JsonTokenType.EndArray)
+            {
+                break;
+            }
+
+            if (reader.TokenType == JsonTokenType.StartObject)
+            {
+                var mac = new ChanDiagMacMetrics();
+                while (reader.Read())
+                {
+                    if (reader.TokenType == JsonTokenType.EndObject)
+                    {
+                        break;
+                    }
+
+                    if (reader.TokenType != JsonTokenType.PropertyName)
+                    {
+                        reader.Skip();
+                        continue;
+                    }
+
+                    string prop = reader.GetString() ?? string.Empty;
+                    reader.Read();
+
+                    switch (prop)
+                    {
+                        case "src":
+                            mac.Src = reader.GetString();
+                            break;
+                        case "pkts":
+                            if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt64(out var pkts))
+                            {
+                                mac.Packets = pkts;
+                            }
+                            break;
+                        case "rssi_avg":
+                            if (reader.TokenType == JsonTokenType.Number && reader.TryGetDouble(out var rssiAvg))
+                            {
+                                mac.RssiAvg = rssiAvg;
+                            }
+                            break;
+                        case "rssi_var":
+                            if (reader.TokenType == JsonTokenType.Number && reader.TryGetDouble(out var rssiVar))
+                            {
+                                mac.RssiVar = rssiVar;
+                            }
+                            break;
+                        case "amp_var":
+                            if (reader.TokenType == JsonTokenType.Number && reader.TryGetDouble(out var ampVar))
+                            {
+                                mac.AmpVar = ampVar;
+                            }
+                            break;
+                        default:
+                            reader.Skip();
+                            break;
+                    }
+                }
+
+                macs.Add(mac);
+            }
+            else
+            {
+                reader.Skip();
+            }
+        }
+
+        return macs;
     }
 
     private static double[]? ReadDoubleArray(ref Utf8JsonReader reader)
@@ -546,6 +688,11 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
             writer.WriteNumber("src", value.SrcMac.Value);
         }
 
+        if (value.Channel.HasValue && value.Rf is null)
+        {
+            writer.WriteNumber("ch", value.Channel.Value);
+        }
+
         if (value.Imu is not null)
         {
             writer.WritePropertyName("imu");
@@ -561,6 +708,32 @@ public sealed class NodePayloadJsonConverter : JsonConverter<NodePayload>
             writer.WriteNumber("packets", value.Rf.Packets);
             writer.WriteNumber("errors", value.Rf.Errors);
             writer.WriteNumber("duration_ms", value.Rf.DurationMs);
+        }
+
+        if (value.ChanDiag is not null)
+        {
+            writer.WriteNumber("ch", value.ChanDiag.Channel);
+            writer.WriteNumber("duration_ms", value.ChanDiag.DurationMs);
+            writer.WriteNumber("total_pkts", value.ChanDiag.TotalPackets);
+
+            if (value.ChanDiag.Macs is not null)
+            {
+                writer.WriteStartArray("macs");
+                foreach (var mac in value.ChanDiag.Macs)
+                {
+                    writer.WriteStartObject();
+                    if (mac.Src is not null)
+                    {
+                        writer.WriteString("src", mac.Src);
+                    }
+                    writer.WriteNumber("pkts", mac.Packets);
+                    writer.WriteNumber("rssi_avg", mac.RssiAvg);
+                    writer.WriteNumber("rssi_var", mac.RssiVar);
+                    writer.WriteNumber("amp_var", mac.AmpVar);
+                    writer.WriteEndObject();
+                }
+                writer.WriteEndArray();
+            }
         }
 
         writer.WriteEndObject();

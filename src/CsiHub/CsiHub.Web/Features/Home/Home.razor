@@ -74,6 +74,19 @@
                     {
                         <span class="badge bg-danger ms-2" data-bs-toggle="tooltip" data-bs-placement="top" title="@GetErrorsTooltip(node)">!</span>
                     }
+                    @if (node.ChanDiag is not null)
+                    {
+                        <div class="small text-muted">
+                            chan diag ch @node.ChanDiag.Channel: @node.ChanDiag.TotalPackets pkts
+                            @if (node.ChanDiag.Macs is { Count: > 0 } diagMacs)
+                            {
+                                @foreach (var m in diagMacs)
+                                {
+                                    <div>@m.Src rssi_var @m.RssiVar.ToString("F2")</div>
+                                }
+                            }
+                        </div>
+                    }
                 </td>
                 <td>@(node.Uptime is not null ? TimeSpan.FromSeconds(node.Uptime.Value).ToString("hh\\:mm\\:ss") : "-")</td>
                 <td>@(node.LastSeen is not null ? (DateTimeOffset.UtcNow - node.LastSeen.Value).ToString("hh\\:mm\\:ss") + " ago" : "-")</td>
@@ -215,6 +228,14 @@
                         <div class="alert alert-info">
                             <strong>Recommendation:</strong> @Store.LatestRecommendation.Reason<br />
                             <small>Score: @Store.LatestRecommendation.Score.ToString("F2")</small>
+                            @if (Store.LatestRecommendation.BestMacAmpVar is double recAmpVar)
+                            {
+                                <br />
+                                <small>
+                                    Amp var: @recAmpVar.ToString("F4") &rarr; score &times;@Store.LatestRecommendation.BestMacAmpFactor.ToString("F2")
+                                    (@((1.0 - Store.LatestRecommendation.BestMacAmpFactor).ToString("P0")) penalty)
+                                </small>
+                            }
                         </div>
                     }
                     else
@@ -265,7 +286,13 @@
                                         var macId = mac.Mac?.Replace(":", "-");
                                         <div class="form-check">
                                             <input class="form-check-input" type="checkbox" id="mac-@macId" checked="@_lockMacs.Contains(mac.Mac!)" @onchange="(e) => ToggleLockMac(mac.Mac, e)">
-                                            <label class="form-check-label" for="mac-@macId" style="font-size: 0.875rem;">@mac.Mac (@mac.Packets pkts, @mac.RssiAvg.ToString("F1") dBm)</label>
+                                            <label class="form-check-label" for="mac-@macId" style="font-size: 0.875rem;">
+                                                @mac.Mac (@mac.Packets pkts, @mac.RssiAvg.ToString("F1") dBm)
+                                                @if (mac.AmpVar is double ampVar)
+                                                {
+                                                    <span class="badge bg-info text-dark ms-1" title="CSI amplitude variance — lower means a more stable baseline">amp_var @ampVar.ToString("F3")</span>
+                                                }
+                                            </label>
                                         </div>
                                     }
                                 }
@@ -437,7 +464,7 @@
             <div class="d-flex flex-wrap gap-3 mt-2 small">
                 @for (int s = 0; s < phaseSeries.Count; s++)
                 {
-                    <span><span style="color:@PhaseColor(s)">&#9632;</span> @phaseSeries[s].NodeMac &larr; @phaseSeries[s].SrcMac</span>
+                    <span><span style="color:@PhaseColor(s)">&#9632;</span> [Ch: @phaseSeries[s].Channel] @phaseSeries[s].NodeMac &larr; @phaseSeries[s].SrcMac</span>
                 }
             </div>
         }
@@ -548,6 +575,7 @@ else
                     {
                         <div class="col-md-4" style="opacity: @GetOpacity(diag).ToString("F2", System.Globalization.CultureInfo.InvariantCulture)">
                             <h6>@diag.NodeMac</h6>
+                            <div>Ch: @diag.Channel</div>
                             <div>@diag.FrameCount frames</div>
                             <div>Δ @diag.FrameDelta / @diag.DropRate.ToString("P1") drop</div>
                             <div>BW: @diag.Bandwidth MHz</div>
@@ -1192,6 +1220,7 @@ else
             list.Add(new BaselineDiagnostic(
                 key.NodeMac,
                 key.SrcMac,
+                key.Channel,
                 baseline.TotalFrames,
                 baseline.Bandwidth,
                 baseline.MeanIq,
@@ -1223,6 +1252,7 @@ else
     private sealed record BaselineDiagnostic(
         string NodeMac,
         ulong SrcMac,
+        int Channel,
         long FrameCount,
         int Bandwidth,
         double MeanIq,

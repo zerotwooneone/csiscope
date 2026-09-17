@@ -62,4 +62,10 @@ public sealed class NodeStateViewModel
     /// Latest sync diagnostic metrics for this node, populated from <c>diag</c> payloads.
     /// </summary>
     public SyncDiagnosticMetrics? SyncDiag { get; set; }
+
+    /// <summary>
+    /// Latest channel verification metrics for this node, populated from
+    /// <c>diag</c> payloads with <c>test == "chan"</c>.
+    /// </summary>
+    public ChanDiagMetrics? ChanDiag { get; set; }
 }

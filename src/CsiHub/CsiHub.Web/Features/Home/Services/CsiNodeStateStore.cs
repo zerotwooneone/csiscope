@@ -167,7 +167,7 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
         {
             if (_sweepAssignments.TryGetValue(mac, out var queue) && queue.TryPeek(out var firstChannel))
             {
-                if (TrySendSetRf(mac, firstChannel, _sweepDwellMs))
+                if (TrySendChanDiag(mac, firstChannel, _sweepDwellMs))
                 {
                     _sweepAwaiting[mac] = firstChannel;
                 }
@@ -369,6 +369,42 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
                     AggregateAndAdvanceSweep(payload);
                 }
 
+                if (payload.Type == "diag" && payload.Test == "chan" && !string.IsNullOrWhiteSpace(payload.Mac) && payload.ChanDiag is not null)
+                {
+                    // Channel verification results ride the same aggregation
+                    // path as rf_scan so the evaluator can score amp_var.
+                    var metrics = ToRfChannelMetrics(payload.ChanDiag);
+
+                    _rfScanResults.AddOrUpdate(
+                        payload.Mac,
+                        _ => new Dictionary<int, RfChannelMetrics> { [metrics.Channel] = metrics },
+                        (_, existing) =>
+                        {
+                            existing[metrics.Channel] = metrics;
+                            return existing;
+                        });
+
+                    _nodes.AddOrUpdate(
+                        payload.Mac,
+                        _ => new NodeStateViewModel
+                        {
+                            Key = payload.Mac,
+                            PortName = payload.PortName ?? string.Empty,
+                            Mac = payload.Mac,
+                            State = NodeConnectionState.Standby,
+                            RfScan = GetRfSnapshot(payload.Mac),
+                        },
+                        (_, existing) =>
+                        {
+                            ApplyRfScan(existing, payload.Mac);
+                            ApplyChanDiag(existing, payload.ChanDiag);
+                            return existing;
+                        });
+
+                    AggregateRfScan(metrics);
+                    AggregateAndAdvanceSweep(payload);
+                }
+
                 if (payload.Type == "diag" && payload.Test == "sync" && !string.IsNullOrWhiteSpace(payload.Mac) && payload.SyncDiag is not null)
                 {
                     _nodes.AddOrUpdate(
@@ -550,6 +586,11 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
     private void ApplySyncDiagnostics(NodeStateViewModel node, SyncDiagnosticMetrics? syncDiag)
     {
         node.SyncDiag = syncDiag;
+    }
+
+    private void ApplyChanDiag(NodeStateViewModel node, ChanDiagMetrics? chanDiag)
+    {
+        node.ChanDiag = chanDiag;
     }
 
     private void ApplyRfScan(NodeStateViewModel node, string mac)
@@ -786,7 +827,12 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
                     RssiMin = Math.Min(existing.RssiMin, mac.RssiMin),
                     RssiMax = Math.Max(existing.RssiMax, mac.RssiMax),
                     RssiAvg = rssiAvg,
-                    DurationMs = existing.DurationMs + mac.DurationMs
+                    DurationMs = existing.DurationMs + mac.DurationMs,
+                    // Packet-weighted variance merge when both dwells measured
+                    // amplitude; otherwise keep whichever side has data.
+                    AmpVar = existing.AmpVar is double ev && mac.AmpVar is double nv && packets > 0
+                        ? ((ev * existing.Packets) + (nv * mac.Packets)) / packets
+                        : mac.AmpVar ?? existing.AmpVar
                 };
             }
             else
@@ -796,14 +842,56 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Adapts a channel verification result into the rf_scan metric shape so
+    /// it can flow through the existing aggregation and scoring pipeline.
+    /// RSSI min/max are approximated at +/-2 standard deviations from the
+    /// reported variance; AmpVar is carried verbatim onto each MAC entry.
+    /// </summary>
+    private static RfChannelMetrics ToRfChannelMetrics(ChanDiagMetrics diag)
+    {
+        var topMacs = diag.Macs?.Select(m =>
+        {
+            double spread = 2.0 * Math.Sqrt(Math.Max(0.0, m.RssiVar));
+            return new RfMacMetrics
+            {
+                Mac = m.Src,
+                Packets = m.Packets,
+                RssiAvg = m.RssiAvg,
+                RssiMin = m.RssiAvg - spread,
+                RssiMax = m.RssiAvg + spread,
+                DurationMs = diag.DurationMs,
+                AmpVar = m.AmpVar,
+            };
+        }).ToList();
+
+        return new RfChannelMetrics
+        {
+            Channel = diag.Channel,
+            DurationMs = diag.DurationMs,
+            Packets = diag.TotalPackets,
+            RssiAvg = topMacs is { Count: > 0 }
+                ? topMacs.Average(m => m.RssiAvg)
+                : 0.0,
+            RssiMin = topMacs is { Count: > 0 }
+                ? topMacs.Min(m => m.RssiMin)
+                : 0.0,
+            RssiMax = topMacs is { Count: > 0 }
+                ? topMacs.Max(m => m.RssiMax)
+                : 0.0,
+            TopMacs = topMacs,
+        };
+    }
+
     private void AggregateAndAdvanceSweep(NodePayload payload)
     {
-        if (payload.Mac is null || payload.Rf is null)
+        var channel = payload.ChanDiag?.Channel ?? payload.Rf?.Channel;
+        if (payload.Mac is null || channel is null)
         {
             return;
         }
 
-        if (!_sweepAwaiting.TryGetValue(payload.Mac, out var expectedChannel) || expectedChannel != payload.Rf.Channel)
+        if (!_sweepAwaiting.TryGetValue(payload.Mac, out var expectedChannel) || expectedChannel != channel.Value)
         {
             return;
         }
@@ -817,7 +905,7 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
 
         if (_sweepAssignments.TryGetValue(payload.Mac, out queue) && queue.TryPeek(out var nextChannel))
         {
-            if (TrySendSetRf(payload.Mac, nextChannel, _sweepDwellMs))
+            if (TrySendChanDiag(payload.Mac, nextChannel, _sweepDwellMs))
             {
                 _sweepAwaiting[payload.Mac] = nextChannel;
             }
@@ -836,16 +924,16 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
         }
     }
 
-    private bool TrySendSetRf(string mac, int channel, int dwellMs)
+    private bool TrySendChanDiag(string mac, int channel, int dwellMs)
     {
         if (!TryGetPortName(mac, out var portName) || string.IsNullOrWhiteSpace(portName))
         {
-            _logger.LogWarning("Cannot send set_rf to {Mac}: port not found.", mac);
+            _logger.LogWarning("Cannot send chan diag to {Mac}: port not found.", mac);
             return false;
         }
 
-        var json = JsonSerializer.Serialize(new { cmd = "set_rf", ch = channel, dwell_ms = dwellMs });
-        _logger.LogDebug("Queueing set_rf for {Mac} on {Port}: {Command}", mac, portName, json);
+        var json = JsonSerializer.Serialize(new { cmd = "diag_test", type = "chan", ch = channel, dwell_ms = dwellMs });
+        _logger.LogDebug("Queueing chan diag for {Mac} on {Port}: {Command}", mac, portName, json);
         return _portManager.TrySendCommand(portName, json);
     }
 

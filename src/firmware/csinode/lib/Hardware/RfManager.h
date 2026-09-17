@@ -43,19 +43,28 @@ public:
 
     /// <summary>
     /// Sets the Wi-Fi radio to a specific channel (manual override).
+    /// Returns true when esp_wifi_set_channel reports success.
     /// </summary>
-    static void setChannel(uint8_t channel);
+    static bool setChannel(uint8_t channel);
 
     /// <summary>
     /// Maximum number of target MAC addresses that can be tracked simultaneously.
     /// </summary>
-    static constexpr size_t MaxTargetMacs = 5;
+    static constexpr size_t MaxTargetMacs = 8;
 
     /// <summary>
     /// Starts passive sniffing on a channel with a target MAC filter.
     /// macFilters is an array of up to MaxTargetMacs NUL-terminated MAC strings.
     /// </summary>
     static bool startPassive(uint8_t channel, uint8_t bw, const char* const* macFilters, size_t count);
+
+    /// <summary>
+    /// Starts a channel verification diagnostic: dwells on a channel with
+    /// promiscuous RX and CSI capture enabled, accumulates per-MAC packet,
+    /// RSSI and amplitude statistics, then emits one diag summary and
+    /// returns to standby.
+    /// </summary>
+    static void startChanDiag(uint8_t channel, uint16_t dwellMs = 1000);
 
     /// <summary>
     /// True while the channel sweep is still in progress.
@@ -90,10 +99,30 @@ private:
         size_t macTableCount = 0;
     };
 
+    // Per-MAC accumulator for the channel verification diagnostic.
+    struct ChanDiagMac
+    {
+        MacAddress mac;
+        uint32_t packets;
+        int32_t rssiSum;
+        uint64_t rssiSqSum;
+        double ampSum;
+        double ampSqSum;
+        uint32_t ampSamples;
+    };
+
+    static constexpr size_t ChanDiagMacTableSize = 8;
+
     static bool _started;
     static bool _sweepActive;
     static bool _singleChannelActive;
     static bool _passiveActive;
+    static bool _chanDiagActive;
+    static uint8_t _chanDiagChannel;
+    static unsigned long _chanDiagStartMs;
+    static uint32_t _chanDiagTotalPkts;
+    static std::array<ChanDiagMac, ChanDiagMacTableSize> _chanDiagMacs;
+    static size_t _chanDiagMacCount;
     static uint8_t _singleChannel;
     static uint8_t _passiveChannel;
     static uint8_t _passiveBw;
@@ -120,6 +149,10 @@ private:
     static void handleCsi(wifi_csi_info_t* info);
     static void emitCsi(wifi_csi_info_t* info, const int8_t* csiBuf, uint16_t csiLen);
     static void prewarmCsiDoc();
+    static ChanDiagMac* findOrAddChanDiagMac(const uint8_t* mac);
+    static void accumulateChanDiagPacket(wifi_promiscuous_pkt_t* pkt);
+    static void accumulateChanDiagCsi(wifi_csi_info_t* info);
+    static void emitChanDiag();
 
     friend void csiRxCallback(void* ctx, wifi_csi_info_t* info);
 };

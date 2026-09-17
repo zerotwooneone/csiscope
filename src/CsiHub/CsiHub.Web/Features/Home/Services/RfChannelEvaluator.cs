@@ -57,6 +57,8 @@ public sealed class RfChannelEvaluator
             Mac = bestMac?.Metrics.Mac,
             Score = bestChannelScore,
             Aggregate = bestChannel,
+            BestMacAmpVar = bestMac?.Metrics.AmpVar,
+            BestMacAmpFactor = bestMac?.Stats.AmpFactor ?? 1.0,
             TopMacs = bestChannel.TopMacs.Values
                 .Select(m => new { Metrics = m, Stats = EvaluateMac(m) })
                 .OrderByDescending(x => x.Stats.Score)
@@ -148,9 +150,10 @@ public sealed class RfChannelEvaluator
 
     /// <summary>
     /// Evaluates a single transmitter. Returns PPS, a stability percentage,
-    /// and an overall score where higher is better.
+    /// the amplitude-variance multiplier applied to the score, and an overall
+    /// score where higher is better.
     /// </summary>
-    private static (double Pps, double Stability, double Score) EvaluateMac(RfMacMetrics mac)
+    private static (double Pps, double Stability, double AmpFactor, double Score) EvaluateMac(RfMacMetrics mac)
     {
         double seconds = Math.Max(1, mac.DurationMs) / 1000.0;
         double pps = mac.Packets / seconds;
@@ -175,9 +178,13 @@ public sealed class RfChannelEvaluator
         }
         double stability = 100.0 / (1.0 + spread / 10.0);
 
-        double score = pps * rssiStrength * (stability / 100.0);
+        // Channels that can form a stable amplitude baseline score higher.
+        // Null AmpVar (plain rf_scan dwell, no CSI data) is neutral.
+        double ampFactor = mac.AmpVar is double v ? 1.0 / (1.0 + v) : 1.0;
 
-        return (pps, stability, score);
+        double score = pps * rssiStrength * (stability / 100.0) * ampFactor;
+
+        return (pps, stability, ampFactor, score);
     }
 }
 

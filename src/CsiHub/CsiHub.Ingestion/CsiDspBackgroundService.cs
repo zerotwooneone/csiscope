@@ -22,9 +22,9 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
     private readonly CsiIngestionChannel _channel;
     private readonly ILogger<CsiDspBackgroundService> _logger;
     private readonly IOptionsMonitor<CsiAoaOptions> _aoaOptions;
-    private readonly ConcurrentDictionary<(string NodeMac, ulong SrcMac), RoomBaseline> _baselines = new();
-    private readonly ConcurrentDictionary<(string NodeMac, ulong SrcMac), DateTimeOffset> _lastUpdateAt = new();
-    private readonly ConcurrentDictionary<(string NodeMac, ulong SrcMac), (Complex Sample, DateTimeOffset At)> _latestSamples = new();
+    private readonly ConcurrentDictionary<(string NodeMac, ulong SrcMac, int Channel), RoomBaseline> _baselines = new();
+    private readonly ConcurrentDictionary<(string NodeMac, ulong SrcMac, int Channel), DateTimeOffset> _lastUpdateAt = new();
+    private readonly ConcurrentDictionary<(string NodeMac, ulong SrcMac, int Channel), (Complex Sample, DateTimeOffset At)> _latestSamples = new();
     private readonly ConcurrentDictionary<ulong, AoaEstimator.AoaResult> _aoaResults = new();
     private readonly ConcurrentDictionary<string, double[]> _latestImu = new();
 
@@ -42,9 +42,9 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
     private long _cfgNonZero;         // frames where the configured subcarrier is nonzero
     private long _fwReportedFrames;   // frames that carried a firmware nz field
     private long _fwNonZeroFrames;    // frames where firmware reported nz > 0
-    private readonly ConcurrentDictionary<(string NodeMac, ulong SrcMac), PhaseCoherence> _phaseCoherence = new();
+    private readonly ConcurrentDictionary<(string NodeMac, ulong SrcMac, int Channel), PhaseCoherence> _phaseCoherence = new();
     private const int PhaseHistoryCapacity = 128;
-    private readonly ConcurrentDictionary<(string NodeMac, ulong SrcMac), PhaseHistoryBuffer> _phaseHistory = new();
+    private readonly ConcurrentDictionary<(string NodeMac, ulong SrcMac, int Channel), PhaseHistoryBuffer> _phaseHistory = new();
     private bool _subcarrierWarned;
     private volatile IReadOnlyDictionary<string, AoaEstimator.SensorPosition> _sensorPositions =
         new Dictionary<string, AoaEstimator.SensorPosition>(StringComparer.OrdinalIgnoreCase);
@@ -99,7 +99,7 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
     /// <summary>
     /// Snapshot of the current baselines for inspection or downstream fusion.
     /// </summary>
-    public IReadOnlyDictionary<(string NodeMac, ulong SrcMac), RoomBaseline> Baselines => _baselines;
+    public IReadOnlyDictionary<(string NodeMac, ulong SrcMac, int Channel), RoomBaseline> Baselines => _baselines;
 
     /// <summary>
     /// Per-target AoA estimates computed from the latest per-node CSI snapshots.
@@ -184,7 +184,7 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
             var phases = kv.Value.Snapshot();
             if (phases.Length > 0)
             {
-                list.Add(new PhaseSeries(kv.Key.NodeMac, FormatMac(kv.Key.SrcMac), _refIndex, phases));
+                list.Add(new PhaseSeries(kv.Key.NodeMac, FormatMac(kv.Key.SrcMac), kv.Key.Channel, _refIndex, phases));
             }
         }
 
@@ -194,7 +194,7 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
     /// <summary>
     /// One node's raw phase time-series at the reference subcarrier.
     /// </summary>
-    public sealed record PhaseSeries(string NodeMac, string SrcMac, int SubcarrierIndex, double[] Phases);
+    public sealed record PhaseSeries(string NodeMac, string SrcMac, int Channel, int SubcarrierIndex, double[] Phases);
 
     /// <summary>
     /// Replaces the sensor-position map used for AoA. Called by the geometry store
@@ -222,8 +222,15 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
                     }
 
                     var rawMac = payload.Mac!;
-                    var key = (NodeMac: rawMac, SrcMac: payload.SrcMac ?? 0UL);
-                    var sampleKey = (NodeMac: MacAddressFormatter.ToCanonical(rawMac), SrcMac: key.SrcMac);
+
+                    // One canonical key for every per-link dictionary: baselines,
+                    // samples, and phase stats can no longer diverge on MAC
+                    // formatting, and the hardware-stamped channel keeps
+                    // cross-channel traffic out of each other's baselines.
+                    var key = (
+                        NodeMac: MacAddressFormatter.ToCanonicalCached(rawMac),
+                        SrcMac: payload.SrcMac ?? 0UL,
+                        Channel: payload.Channel ?? 0);
 
                     if (payload.Type == "imu" && payload.Imu is not null)
                     {
@@ -270,8 +277,8 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
 
                         var sample = GetSubcarrierSample(payload.Csi, aoaOptions.SubcarrierIndex);
                         ScanCsiHealth(payload.Csi, payload.CsiNonZero, aoaOptions.SubcarrierIndex, key);
-                        _latestSamples[sampleKey] = (sample, payload.ReceivedAt);
-                        TryUpdateAoa(key.SrcMac, payload.ReceivedAt, aoaOptions);
+                        _latestSamples[key] = (sample, payload.ReceivedAt);
+                        TryUpdateAoa(key.SrcMac, key.Channel, payload.ReceivedAt, aoaOptions);
                     }
 
                     if (DateTimeOffset.UtcNow - _lastPrune > _pruneInterval)
@@ -296,7 +303,7 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
         }
     }
 
-    private void TryUpdateAoa(ulong srcMac, DateTimeOffset now, CsiAoaOptions aoaOptions)
+    private void TryUpdateAoa(ulong srcMac, int channel, DateTimeOffset now, CsiAoaOptions aoaOptions)
     {
         var sensorPositions = _sensorPositions;
         if (sensorPositions.Count == 0)
@@ -310,8 +317,8 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
 
         foreach (var (configuredMac, position) in sensorPositions)
         {
-            var nodeMac = MacAddressFormatter.ToCanonical(configuredMac);
-            if (!_latestSamples.TryGetValue((nodeMac, srcMac), out var entry))
+            var nodeMac = MacAddressFormatter.ToCanonicalCached(configuredMac);
+            if (!_latestSamples.TryGetValue((nodeMac, srcMac, channel), out var entry))
             {
                 LastAoaStatus = $"Waiting for node {configuredMac}";
                 return;
@@ -368,7 +375,7 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
         return new Complex(real, imag);
     }
 
-    private void ScanCsiHealth(double[]? csi, int? firmwareNonZero, int configuredIndex, (string NodeMac, ulong SrcMac) key)
+    private void ScanCsiHealth(double[]? csi, int? firmwareNonZero, int configuredIndex, (string NodeMac, ulong SrcMac, int Channel) key)
     {
         Interlocked.Increment(ref _csiFrames);
 

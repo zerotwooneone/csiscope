@@ -7,5 +7,6 @@ enum class SystemState
     STATE_STREAMING,
     STATE_DIAG_SYNC,
     STATE_DIAG_IMU,
-    STATE_DIAG_RF
+    STATE_DIAG_RF,
+    STATE_DIAG_CHAN
 };

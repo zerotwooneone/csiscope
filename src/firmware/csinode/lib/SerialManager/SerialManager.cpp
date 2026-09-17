@@ -63,6 +63,8 @@ const char* SerialManager::stateToString(SystemState state)
         return "diag_imu";
     case SystemState::STATE_DIAG_RF:
         return "diag_rf";
+    case SystemState::STATE_DIAG_CHAN:
+        return "diag_chan";
     default:
         return "unknown";
     }
@@ -265,6 +267,32 @@ void SerialManager::parseAndDispatch(const char* line)
             currentState = SystemState::STATE_DIAG_RF;
             HardwareDiagnostics::setLedState(currentState);
             RfManager::startSweep();
+            sendAck("diag_test", true, seq);
+        }
+        else if (strcmp(type, "chan") == 0)
+        {
+            int ch = doc["ch"] | 0;
+            if (ch < 1 || ch > 13)
+            {
+                sendAck("diag_test", false, seq, "invalid_channel");
+                return;
+            }
+
+            // Dwell is clamped to 100-5000 ms rather than rejected so the host
+            // can sweep with a single fixed parameter set.
+            int dwellMs = doc["dwell_ms"] | 1000;
+            if (dwellMs < 100)
+            {
+                dwellMs = 100;
+            }
+            else if (dwellMs > 5000)
+            {
+                dwellMs = 5000;
+            }
+
+            currentState = SystemState::STATE_DIAG_CHAN;
+            HardwareDiagnostics::setLedState(currentState);
+            RfManager::startChanDiag(static_cast<uint8_t>(ch), static_cast<uint16_t>(dwellMs));
             sendAck("diag_test", true, seq);
         }
         else

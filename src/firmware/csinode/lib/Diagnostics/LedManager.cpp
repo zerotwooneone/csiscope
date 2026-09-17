@@ -118,6 +118,10 @@ LedManager::Pattern LedManager::patternForState(SystemState state)
         // Blinking magenta in IMU diagnostic mode.
         return { CRGB::Magenta, CRGB::Black, 250, 250, false, 500 };
 
+    case SystemState::STATE_DIAG_CHAN:
+        // Rapid flashing cyan/white while verifying a channel.
+        return { CRGB::Cyan, CRGB::White, 100, 100, false, 200 };
+
     case SystemState::STATE_STANDBY:
     case SystemState::STATE_BOOT:
     default:
