@@ -26,6 +26,9 @@ public sealed class SensingHostWorker : BackgroundService
     private const int IngressCapacity = 1000;
     private const int MaxLineBytes = 4096; // firmware CsiJsonBufferSize ceiling
 
+    // Snapshot cadence matches the Blazor polling rate — faster is wasted GC.
+    private static readonly TimeSpan SnapshotInterval = TimeSpan.FromMilliseconds(333);
+
     private readonly SensingOrchestrator _orchestrator;
     private readonly BroadcastRadioAdapter _radio;
     private readonly TimeProvider _time;
@@ -35,6 +38,14 @@ public sealed class SensingHostWorker : BackgroundService
     private readonly TimeSpan _reconnectDelay;
     private readonly ILogger<SensingHostWorker>? _logger;
     private readonly Channel<IngressItem> _ingress;
+    private SensingSnapshot? _latestSnapshot;
+    private DateTimeOffset _lastSnapshotAt = DateTimeOffset.MinValue;
+
+    /// <summary>
+    /// Most recent orchestrator projection — atomically swapped each snapshot
+    /// interval, safe for UI threads to poll without locks.
+    /// </summary>
+    public SensingSnapshot? LatestSnapshot => Volatile.Read(ref _latestSnapshot);
 
     public SensingHostWorker(
         SensingOrchestrator orchestrator,
@@ -91,7 +102,16 @@ public sealed class SensingHostWorker : BackgroundService
                 // window elapsed — fall through to tick
             }
 
-            _orchestrator.Tick(_time.GetUtcNow());
+            var now = _time.GetUtcNow();
+            _orchestrator.Tick(now);
+
+            // Throttled projection — the UI polls at ~3Hz; snapshotting every
+            // 100ms tick would triple the allocation rate for no benefit.
+            if (now - _lastSnapshotAt >= SnapshotInterval)
+            {
+                _lastSnapshotAt = now;
+                Volatile.Write(ref _latestSnapshot, _orchestrator.CreateSnapshot(now));
+            }
         }
     }
 

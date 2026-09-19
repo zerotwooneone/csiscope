@@ -9,7 +9,7 @@ namespace CsiScope.Infrastructure;
 /// legacy pattern of a bounded queue the UI polls. Drop-oldest so a stalled
 /// consumer never backs pressure into the sensing path.
 /// </summary>
-public sealed class ChannelAnomalySink : IAnomalySink
+public sealed class ChannelAnomalySink : IAnomalySink, IAnomalySource
 {
     private readonly Channel<AnomalyDetected> _channel = Channel.CreateBounded<AnomalyDetected>(
         new BoundedChannelOptions(100)
@@ -26,4 +26,8 @@ public sealed class ChannelAnomalySink : IAnomalySink
         _channel.Writer.TryWrite(anomaly);
         return ValueTask.CompletedTask;
     }
+
+    /// <inheritdoc />
+    public IAsyncEnumerable<AnomalyDetected> ReadAllAsync(CancellationToken ct = default)
+        => _channel.Reader.ReadAllAsync(ct);
 }

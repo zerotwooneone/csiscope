@@ -272,6 +272,58 @@ public sealed class SensingOrchestrator
     /// <summary>Domain events recorded since the last drain (lock acquired, confidence degraded).</summary>
     public IReadOnlyList<object> DrainEvents() => Campaign.DrainEvents();
 
+    /// <summary>
+    /// Projects internal state into an immutable <see cref="SensingSnapshot"/>
+    /// for UI/diagnostic consumers. Drains pending campaign events into
+    /// <see cref="SensingSnapshot.RecentEvents"/> so they can't accumulate.
+    ///
+    /// SINGLE-WRITER ONLY — call from the ingestion/tick thread. Enumerating
+    /// the private dictionaries from any other thread races with mutation.
+    /// </summary>
+    public SensingSnapshot CreateSnapshot(DateTimeOffset now)
+    {
+        var baselines = ImmutableArray.CreateBuilder<BaselineReadModel>(_baselines.Count);
+        foreach (var kv in _baselines)
+        {
+            var b = kv.Value;
+            baselines.Add(new BaselineReadModel(
+                b.Link, b.Mean, b.Floor, b.FillFraction, b.IsConverged, b.TotalFrames, b.LastFrameAt));
+        }
+
+        baselines.Sort((a, b) =>
+        {
+            var cmp = a.Link.Node.ToUInt64().CompareTo(b.Link.Node.ToUInt64());
+            return cmp != 0 ? cmp : a.Link.Source.ToUInt64().CompareTo(b.Link.Source.ToUInt64());
+        });
+
+        var channels = ImmutableArray.CreateBuilder<ChannelActivityReadModel>(_activity.Count);
+        foreach (var kv in _activity)
+        {
+            var a = kv.Value;
+            channels.Add(new ChannelActivityReadModel(
+                kv.Key, new ActivityScore(a.Pps(now)), a.TopMac, a.LastFrameAt));
+        }
+
+        channels.Sort((a, b) => b.Activity.CompareTo(a.Activity));
+
+        var nodes = ImmutableArray.CreateBuilder<NodeLivenessReadModel>(_expectedNodes.Count);
+        foreach (var node in _expectedNodes)
+        {
+            nodes.Add(new NodeLivenessReadModel(
+                node, _nodeLastSeen.TryGetValue(node, out var seen) ? seen : null));
+        }
+
+        return new SensingSnapshot(
+            now,
+            Campaign.Mode,
+            Campaign.LockedChannel,
+            Campaign.PrimaryTarget,
+            baselines.MoveToImmutable(),
+            channels.MoveToImmutable(),
+            nodes.MoveToImmutable(),
+            Campaign.DrainEvents().ToImmutableArray());
+    }
+
     // ---- Hot-path helpers ----
 
     private void RecordActivity(WifiChannel channel, MacAddress source, DateTimeOffset at)
