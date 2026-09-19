@@ -1,0 +1,10 @@
+<Solution>
+  <Project Path="CsiScope.Application.Tests/CsiScope.Application.Tests.csproj" />
+  <Project Path="CsiScope.Application/CsiScope.Application.csproj" />
+  <Project Path="CsiScope.Domain.Tests/CsiScope.Domain.Tests.csproj" />
+  <Project Path="CsiScope.Domain/CsiScope.Domain.csproj" />
+  <Project Path="CsiScope.Infrastructure.IntegrationTests/CsiScope.Infrastructure.IntegrationTests.csproj" />
+  <Project Path="CsiScope.Infrastructure.Tests/CsiScope.Infrastructure.Tests.csproj" />
+  <Project Path="CsiScope.Infrastructure/CsiScope.Infrastructure.csproj" />
+  <Project Path="CsiScope.Web/CsiScope.Web.csproj" />
+</Solution>

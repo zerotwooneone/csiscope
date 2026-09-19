@@ -6,6 +6,15 @@ namespace CsiScope.Domain.Strategy;
 /// Tunable policy parameters. Defaults mirror the proven host values
 /// (8 s dead-air skip, 90 s acquisition cap, inverse-scaled audits).
 /// </summary>
+/// <remarks>
+/// Lessons carried over from the legacy RfChannelEvaluator, for when candidate
+/// scoring grows beyond raw activity: a transmitter below ~50 pps starves the
+/// pipeline (legacy applied a 0.1× score penalty); RSSI stability was scored
+/// 100/(1+spread/10); MACs with low amplitude variance were preferred via
+/// 1/(1+ampVar) since they can hold a baseline; and a sqrt(packets)/100
+/// congestion bonus broke ties toward busier channels. Packet-weighted
+/// variance merging combined dwells: (v1·n1 + v2·n2)/(n1+n2).
+/// </remarks>
 public sealed record SensingThresholds
 {
     public static SensingThresholds Default { get; } = new();

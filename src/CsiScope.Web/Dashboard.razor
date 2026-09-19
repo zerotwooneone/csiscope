@@ -44,7 +44,7 @@
                                 {
                                     var stale = n.LastSeen is null || snapshot.TakenAt - n.LastSeen.Value > TimeSpan.FromSeconds(10);
                                     <tr>
-                                        <td><code>@n.Node</code></td>
+                                        <td><code style="color:@n.Node.ToString().ToMacColor()">@n.Node</code></td>
                                         <td class="@(stale ? "text-danger fw-bold" : "text-success")">
                                             @(n.LastSeen is { } seen ? $"{(snapshot.TakenAt - seen).TotalSeconds:F1}s ago" : "never seen")
                                         </td>
@@ -126,8 +126,8 @@
                                 @foreach (var b in snapshot.Baselines)
                                 {
                                     <tr>
-                                        <td><code>@b.Link.Node</code></td>
-                                        <td><code>@b.Link.Source</code></td>
+                                        <td><code style="color:@b.Link.Node.ToString().ToMacColor()">@b.Link.Node</code></td>
+                                        <td><code style="color:@b.Link.Source.ToString().ToMacColor()">@b.Link.Source</code></td>
                                         <td>@((int)b.Link.Channel)</td>
                                         <td>
                                             <div class="progress" style="height:10px;">
@@ -159,7 +159,7 @@
                                 {
                                     <tr>
                                         <td>@a.At.ToString("HH:mm:ss.fff")</td>
-                                        <td><code>@a.Link.Node → @a.Link.Source</code></td>
+                                        <td><code style="color:@a.Link.Node.ToString().ToMacColor()">@a.Link.Node</code> → <code style="color:@a.Link.Source.ToString().ToMacColor()">@a.Link.Source</code></td>
                                         <td><span class="badge bg-danger">@a.DeviationRatio.Value.ToString("F1")×</span></td>
                                         <td>@a.RawAmplitude.ToString("F2")</td>
                                         <td>@a.CurrentFloor.ToString("F4")</td>

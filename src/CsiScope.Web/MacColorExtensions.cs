@@ -1,11 +1,11 @@
-using System;
 using System.Security.Cryptography;
 using System.Text;
 
-namespace CsiHub.Features.Home.Services;
+namespace CsiScope.Web;
 
 /// <summary>
 /// Generates a deterministic, highly-visible #RRGGBB color from a MAC address.
+/// Ported from the legacy CsiHub dashboard.
 /// </summary>
 public static class MacColorExtensions
 {
