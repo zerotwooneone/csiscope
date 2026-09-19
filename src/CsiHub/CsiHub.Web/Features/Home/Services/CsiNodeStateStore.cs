@@ -65,10 +65,12 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
     public IReadOnlyDictionary<int, RfChannelAggregate> CombinedRfScan => _combinedRfScan;
 
     /// <summary>
-    /// Ranks transmitters across every scanned channel by total packet count.
-    /// Multicast and locally-administered (randomized probe-request) MACs are
-    /// excluded; the same transmitter seen on multiple channels is merged into
-    /// one entry (packets summed, best RSSI kept, lowest AmpVar kept).
+    /// Ranks transmitters across every scanned channel by packets-per-second
+    /// (Packets / DurationMs), so recently-active transmitters outrank ones
+    /// that were bursty in the past but have gone silent. Multicast and
+    /// locally-administered (randomized probe-request) MACs are excluded; the
+    /// same transmitter seen on multiple channels is merged into one entry
+    /// (packets and observed time summed, best RSSI kept, lowest AmpVar kept).
     /// </summary>
     public IReadOnlyList<RfMacMetrics> GetTopRankedMacs(int count = 8, long minPackets = 50)
     {
@@ -99,7 +101,7 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
                         RssiMin = Math.Min(existing.RssiMin, mac.RssiMin),
                         RssiMax = Math.Max(existing.RssiMax, mac.RssiMax),
                         RssiAvg = Math.Max(existing.RssiAvg, mac.RssiAvg),
-                        DurationMs = Math.Max(existing.DurationMs, mac.DurationMs),
+                        DurationMs = existing.DurationMs + mac.DurationMs,
                         AmpVar = MinAmpVar(existing.AmpVar, mac.AmpVar),
                     };
                 }
@@ -112,9 +114,54 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
 
         return merged.Values
             .Where(m => m.Packets >= minPackets)
-            .OrderByDescending(m => m.Packets)
+            // 100ms duration floor: a 2-packet/50ms observation would otherwise
+            // inflate to 40pps and outrank genuinely active transmitters.
+            .OrderByDescending(m => m.Packets * 1000.0 / Math.Max(m.DurationMs, 100))
             .Take(Math.Clamp(count, 1, 8))
             .ToList();
+    }
+
+    /// <summary>
+    /// Returns the channels on which the given transmitters are most active,
+    /// ordered by their best packets-per-second within each channel's dwell.
+    /// Used to restrict detection cycling to channels that actually carry the
+    /// selected targets' traffic. Empty when no scan data covers the MACs.
+    /// </summary>
+    public int[] GetPrimaryChannelsForMacs(IEnumerable<string> macs)
+    {
+        var wanted = new HashSet<string>(
+            macs.Where(m => !string.IsNullOrWhiteSpace(m))
+                .Select(MacAddressFormatter.ToCanonicalCached),
+            StringComparer.OrdinalIgnoreCase);
+        if (wanted.Count == 0)
+        {
+            return Array.Empty<int>();
+        }
+
+        var bestPps = new Dictionary<int, double>();
+        foreach (var (channel, aggregate) in _combinedRfScan)
+        {
+            foreach (var mac in aggregate.TopMacs.Values)
+            {
+                if (string.IsNullOrWhiteSpace(mac.Mac))
+                {
+                    continue;
+                }
+
+                if (!wanted.Contains(MacAddressFormatter.ToCanonicalCached(mac.Mac)))
+                {
+                    continue;
+                }
+
+                double pps = mac.Packets * 1000.0 / Math.Max(mac.DurationMs, 100);
+                if (!bestPps.TryGetValue(channel, out var current) || pps > current)
+                {
+                    bestPps[channel] = pps;
+                }
+            }
+        }
+
+        return bestPps.OrderByDescending(kv => kv.Value).Select(kv => kv.Key).ToArray();
     }
 
     private static double? MinAmpVar(double? a, double? b)

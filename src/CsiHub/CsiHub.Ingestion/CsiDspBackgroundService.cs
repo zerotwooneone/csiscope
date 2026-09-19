@@ -61,6 +61,11 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
         new Dictionary<string, AoaEstimator.SensorPosition>(StringComparer.OrdinalIgnoreCase);
     private readonly TimeSpan _pruneInterval = TimeSpan.FromSeconds(30);
     private readonly TimeSpan _baselineMaxAge = TimeSpan.FromMinutes(10);
+    // Baselines that never reach this frame count within this idle window are
+    // one-hit wonders (e.g. a stray packet from a dormant MAC) and are pruned
+    // early instead of lingering for the full max age.
+    private static readonly TimeSpan _underdevelopedMaxAge = TimeSpan.FromSeconds(60);
+    private const long UnderdevelopedFrameFloor = 10;
     private DateTimeOffset _lastPrune = DateTimeOffset.UtcNow;
 
     private CancellationTokenSource? _cts;
@@ -784,9 +789,18 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
     {
         foreach (var key in _lastUpdateAt.Keys)
         {
-            if (_lastUpdateAt.TryGetValue(key, out var last) &&
-                now - last > _baselineMaxAge &&
-                _baselines.TryRemove(key, out _))
+            if (!_lastUpdateAt.TryGetValue(key, out var last))
+            {
+                continue;
+            }
+
+            var idle = now - last;
+            bool expired = idle > _baselineMaxAge;
+            bool underdeveloped = idle > _underdevelopedMaxAge
+                && _baselines.TryGetValue(key, out var baseline)
+                && baseline.TotalFrames < UnderdevelopedFrameFloor;
+
+            if ((expired || underdeveloped) && _baselines.TryRemove(key, out _))
             {
                 _lastUpdateAt.TryRemove(key, out _);
                 _varianceHistory.TryRemove(key, out _);

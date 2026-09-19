@@ -504,7 +504,8 @@
         {
             <div class="small text-muted mb-1">
                 Live deviation — @varianceSeries.Value.Key.NodeMac &larr; @FormatSrcMac(varianceSeries.Value.Key.SrcMac)
-                ch @varianceSeries.Value.Key.Channel (floor @varianceSeries.Value.Floor.ToString("F4"))
+                ch @varianceSeries.Value.Key.Channel — frames @varianceSeries.Value.TotalFrames/@varianceSeries.Value.WindowSize,
+                p95 floor @varianceSeries.Value.Floor.ToString("F4")
             </div>
             <svg viewBox="0 0 720 120" class="border rounded w-100" preserveAspectRatio="none" style="max-height: 8rem;">
                 <polyline points="@VariancePoints(varianceSeries.Value.Values, varianceSeries.Value.YMax)" fill="none" stroke="#e6194b" stroke-width="1.2" stroke-opacity="0.85" />
@@ -727,7 +728,11 @@ else
 
         while (await _timer.WaitForNextTickAsync().ConfigureAwait(false))
         {
-            _allBaselinesConverged = Dsp.Baselines.Any() && Dsp.Baselines.Values.All(b => b.IsConverged);
+            // Converged = every node has at least one locked baseline link.
+            // Requiring ALL links to converge lets a single dormant MAC stall
+            // the indicator forever.
+            var byNode = Dsp.Baselines.GroupBy(kv => kv.Key.NodeMac).ToList();
+            _allBaselinesConverged = byNode.Count > 0 && byNode.All(g => g.Any(kv => kv.Value.IsConverged));
             await InvokeAsync(StateHasChanged).ConfigureAwait(false);
         }
     }
@@ -1083,6 +1088,17 @@ else
         {
             _errorMessage = "Enter at least one valid channel (1-13).";
             return;
+        }
+
+        // Restrict cycling to channels where the selected targets are actually
+        // active; intersect with the user's list, falling back to the primary
+        // set when they don't overlap.
+        var primary = Store.GetPrimaryChannelsForMacs(_lockMacs);
+        if (primary.Length > 0)
+        {
+            var restricted = channels.Where(primary.Contains).ToList();
+            channels = restricted.Count > 0 ? restricted : primary.ToList();
+            _detectChannels = string.Join(", ", channels);
         }
 
         Coordinator.Start(channels.ToArray(), Math.Clamp(_detectDwellMs, 100, 5000), _lockMacs.ToArray());
@@ -1595,9 +1611,10 @@ else
         => $"{(mac >> 40) & 0xFF:X2}:{(mac >> 32) & 0xFF:X2}:{(mac >> 24) & 0xFF:X2}:{(mac >> 16) & 0xFF:X2}:{(mac >> 8) & 0xFF:X2}:{mac & 0xFF:X2}";
 
     // Picks the variance series for the coordinator's current channel (or the
-    // first available), plus its baseline floor and a Y scale that keeps both
-    // the floor line and spikes visible.
-    private ((string NodeMac, ulong SrcMac, int Channel) Key, IReadOnlyList<double> Values, double Floor, double YMax)? GetActiveVarianceSeries()
+    // most active overall), preferring the link with the most baseline frames
+    // so dormant one-hit-wonder links never win the display. Also returns the
+    // baseline floor and a Y scale that keeps floor line and spikes visible.
+    private ((string NodeMac, ulong SrcMac, int Channel) Key, IReadOnlyList<double> Values, double Floor, double YMax, long TotalFrames, int WindowSize)? GetActiveVarianceSeries()
     {
         var series = Dsp.GetVarianceSeries();
         if (series.Count == 0)
@@ -1605,24 +1622,27 @@ else
             return null;
         }
 
-        var kv = Coordinator.CurrentChannel is int ch
-            ? series.FirstOrDefault(x => x.Key.Channel == ch)
-            : default;
-        if (kv.Value is null || kv.Value.Count == 0)
+        var candidates = Coordinator.CurrentChannel is int ch
+            ? series.Where(x => x.Key.Channel == ch).ToList()
+            : series.ToList();
+        if (candidates.Count == 0)
         {
-            kv = series.First();
+            candidates = series.ToList();
         }
 
-        double floor = Dsp.Baselines.TryGetValue(kv.Key, out var baseline)
-            ? baseline.PercentileVariance
-            : 0.0;
+        var kv = candidates
+            .OrderByDescending(x => Dsp.Baselines.TryGetValue(x.Key, out var b) ? b.TotalFrames : 0)
+            .First();
+
+        Dsp.Baselines.TryGetValue(kv.Key, out var baseline);
+        double floor = baseline?.PercentileVariance ?? 0.0;
         double yMax = Math.Max(kv.Value.Max(), floor * 3.0);
         if (yMax <= 0.0)
         {
             yMax = 1e-6;
         }
 
-        return (kv.Key, kv.Value, floor, yMax);
+        return (kv.Key, kv.Value, floor, yMax, baseline?.TotalFrames ?? 0, baseline?.WindowSize ?? 0);
     }
 
     // Maps sample index -> X and deviation (0..yMax) -> Y inside a 720x120 viewBox.
