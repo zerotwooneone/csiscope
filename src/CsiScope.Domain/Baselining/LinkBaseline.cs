@@ -13,15 +13,13 @@ public sealed class LinkBaseline
 {
     public const int DefaultWindowSize = 64;
 
-    // Sustained above-threshold evaluations before the floor re-locks at the
-    // new level — prevents a quiet-transient latch from locking out forever.
-    private const int RelockAfterMisses = 128;
-
-    private static readonly TimeSpan TripwireCooldown = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan DefaultTripwireCooldown = TimeSpan.FromSeconds(1);
 
     private readonly int _windowSize;
     private readonly double _convergenceMultiplier;
     private readonly double _tripwireMultiplier;
+    private readonly int _relockAfterMisses;
+    private readonly TimeSpan _tripwireCooldown;
     private double _mean;
     private double _m2;
     private double _varianceFloor;
@@ -30,11 +28,18 @@ public sealed class LinkBaseline
     private int _convergenceMisses;
     private DateTimeOffset _lastTripwireAt = DateTimeOffset.MinValue;
 
+    /// <param name="relockAfterMisses">Sustained above-threshold evaluations
+    /// before the floor re-locks at the new level — prevents a quiet-transient
+    /// latch from locking out forever.</param>
+    /// <param name="tripwireCooldown">Minimum gap between emitted anomalies so
+    /// a sustained disturbance doesn't flood the event stream.</param>
     public LinkBaseline(
         LinkIdentity link,
         int windowSize = DefaultWindowSize,
         double convergenceMultiplier = 1.5,
-        double tripwireMultiplier = 2.5)
+        double tripwireMultiplier = 2.5,
+        int relockAfterMisses = 128,
+        TimeSpan? tripwireCooldown = null)
     {
         if (windowSize < 2)
         {
@@ -45,6 +50,8 @@ public sealed class LinkBaseline
         _windowSize = windowSize;
         _convergenceMultiplier = convergenceMultiplier;
         _tripwireMultiplier = tripwireMultiplier;
+        _relockAfterMisses = relockAfterMisses;
+        _tripwireCooldown = tripwireCooldown ?? DefaultTripwireCooldown;
     }
 
     public LinkIdentity Link { get; }
@@ -95,7 +102,7 @@ public sealed class LinkBaseline
             double ratio = _varianceFloor > 1e-12 ? squared / _varianceFloor : 0.0;
 
             if (ratio > _tripwireMultiplier
-                && sample.Timestamp - _lastTripwireAt > TripwireCooldown)
+                && sample.Timestamp - _lastTripwireAt > _tripwireCooldown)
             {
                 _lastTripwireAt = sample.Timestamp;
                 anomaly = new AnomalyDetected(Link, ratio, sample.Timestamp);
@@ -131,7 +138,7 @@ public sealed class LinkBaseline
             return true;
         }
 
-        if (++_convergenceMisses >= RelockAfterMisses)
+        if (++_convergenceMisses >= _relockAfterMisses)
         {
             _varianceFloor = variance;
             _convergenceThreshold = _convergenceMultiplier * variance;

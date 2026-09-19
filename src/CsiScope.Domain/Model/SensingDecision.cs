@@ -1,3 +1,5 @@
+using System.Collections.Immutable;
+
 namespace CsiScope.Domain.Model;
 
 /// <summary>
@@ -16,8 +18,30 @@ public abstract record SensingDecision
     /// <summary>Begin (or continue) a survey sweep over the given plan.</summary>
     public sealed record BeginSurvey(ScanPlan Plan) : SensingDecision;
 
-    /// <summary>Lock a channel and acquire baselines for the MAC filter.</summary>
-    public sealed record BeginAcquisition(WifiChannel Channel, IReadOnlyList<MacAddress> MacFilter) : SensingDecision;
+    /// <summary>
+    /// Lock a channel and acquire baselines for the MAC filter. The filter is
+    /// an <see cref="ImmutableArray{T}"/> with sequence equality — identical
+    /// decisions compare equal regardless of array instance.
+    /// </summary>
+    public sealed record BeginAcquisition(WifiChannel Channel, ImmutableArray<MacAddress> MacFilter) : SensingDecision
+    {
+        public bool Equals(BeginAcquisition? other) =>
+            other is not null
+            && Channel == other.Channel
+            && MacFilter.SequenceEqual(other.MacFilter);
+
+        public override int GetHashCode()
+        {
+            var hash = new HashCode();
+            hash.Add(Channel);
+            foreach (var mac in MacFilter)
+            {
+                hash.Add(mac);
+            }
+
+            return hash.ToHashCode();
+        }
+    }
 
     /// <summary>All nodes converged — enter anomaly detection.</summary>
     public sealed record EnterDetecting : SensingDecision;

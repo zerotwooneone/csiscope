@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using CsiScope.Domain.Model;
 
 namespace CsiScope.Domain.Strategy;
@@ -20,7 +21,7 @@ public sealed record SensingContext
     /// <summary>The locked channel while Acquiring/Detecting.</summary>
     public WifiChannel? LockedChannel { get; init; }
 
-    /// <summary>Primary-target confidence (window fill × stability × rate × freshness).</summary>
+    /// <summary>Primary-target confidence (fill × stability × target PPS × age).</summary>
     public ConfidenceScore Confidence { get; init; } = ConfidenceScore.Zero;
 
     /// <summary>Aggregate channel activity floor — null means "no data yet" (treated as dead).</summary>
@@ -30,10 +31,10 @@ public sealed record SensingContext
     public bool AllNodesConverged { get; init; }
 
     /// <summary>Survey-ranked acquisition candidates, best activity first.</summary>
-    public IReadOnlyList<ChannelCandidate> Candidates { get; init; } = Array.Empty<ChannelCandidate>();
+    public ImmutableArray<ChannelCandidate> Candidates { get; init; } = [];
 
     /// <summary>Firmware MAC filter for acquisition/lock commands.</summary>
-    public IReadOnlyList<MacAddress> MacFilter { get; init; } = Array.Empty<MacAddress>();
+    public ImmutableArray<MacAddress> MacFilter { get; init; } = [];
 
     /// <summary>Last environment audit; null falls back to ModeEnteredAt.</summary>
     public DateTimeOffset? LastAuditAt { get; init; }

@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using CsiScope.Domain.Model;
 using FluentAssertions;
 using Xunit;
@@ -89,10 +90,10 @@ public class ConfidenceScoreTests
         var score = new ConfidenceScore(1.5, -0.2, 0.5, 2.0);
 
         // Assert
-        score.WindowFill.Should().Be(1.0);
-        score.FloorStability.Should().Be(0.0);
-        score.IngestionRate.Should().Be(0.5);
-        score.Freshness.Should().Be(1.0);
+        score.Fill.Should().Be(1.0);
+        score.Stability.Should().Be(0.0);
+        score.TargetPps.Should().Be(0.5);
+        score.Age.Should().Be(1.0);
     }
 
     [Fact]
@@ -101,5 +102,59 @@ public class ConfidenceScoreTests
         // Act & Assert
         new ConfidenceScore(1, 1, 1, 0).Value.Should().Be(0);
         ConfidenceScore.Full.Value.Should().Be(1);
+    }
+}
+
+public class SensingDecisionTests
+{
+    private static readonly MacAddress Target = MacAddress.Parse("08:E9:F6:63:9A:CC");
+
+    [Fact]
+    public void BeginAcquisition_with_equal_filter_contents_compares_equal()
+    {
+        // Arrange — different array instances, identical contents.
+        var a = new SensingDecision.BeginAcquisition(new WifiChannel(7), ImmutableArray.Create(Target));
+        var b = new SensingDecision.BeginAcquisition(new WifiChannel(7), ImmutableArray.Create(Target));
+
+        // Act & Assert — regression guard: record equality on collections
+        // must be sequence-based, not reference-based.
+        a.Should().Be(b);
+        a.GetHashCode().Should().Be(b.GetHashCode());
+    }
+
+    [Fact]
+    public void BeginAcquisition_with_different_filter_compares_unequal()
+    {
+        // Arrange
+        var a = new SensingDecision.BeginAcquisition(new WifiChannel(7), ImmutableArray.Create(Target));
+        var b = new SensingDecision.BeginAcquisition(new WifiChannel(7),
+            ImmutableArray.Create(Target, MacAddress.Parse("14:C1:9F:2E:53:D0")));
+
+        // Act & Assert
+        a.Should().NotBe(b);
+    }
+
+    [Fact]
+    public void ScanPlan_with_equal_channels_compares_equal()
+    {
+        // Arrange
+        var a = new ScanPlan(ImmutableArray.Create(new WifiChannel(6), new WifiChannel(11)), TimeSpan.FromMilliseconds(250));
+        var b = new ScanPlan(ImmutableArray.Create(new WifiChannel(6), new WifiChannel(11)), TimeSpan.FromMilliseconds(250));
+
+        // Act & Assert
+        a.Should().Be(b);
+    }
+
+    [Fact]
+    public void AuditChannels_equality_flows_through_scan_plan()
+    {
+        // Arrange
+        var plan = new ScanPlan(ImmutableArray.Create(new WifiChannel(7)), TimeSpan.FromMilliseconds(250));
+        var a = new SensingDecision.AuditChannels(plan, new WifiChannel(6));
+        var b = new SensingDecision.AuditChannels(
+            new ScanPlan(ImmutableArray.Create(new WifiChannel(7)), TimeSpan.FromMilliseconds(250)), new WifiChannel(6));
+
+        // Act & Assert
+        a.Should().Be(b);
     }
 }

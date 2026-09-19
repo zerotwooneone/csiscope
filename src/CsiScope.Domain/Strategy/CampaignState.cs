@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using CsiScope.Domain.Events;
 using CsiScope.Domain.Model;
 
@@ -21,7 +22,7 @@ public sealed class CampaignState
     /// <summary>First MAC in the filter — the primary confidence target.</summary>
     public MacAddress? PrimaryTarget { get; private set; }
 
-    public IReadOnlyList<MacAddress> MacFilter { get; private set; } = Array.Empty<MacAddress>();
+    public ImmutableArray<MacAddress> MacFilter { get; private set; } = [];
 
     public DateTimeOffset ModeEnteredAt { get; private set; }
 
@@ -41,7 +42,7 @@ public sealed class CampaignState
                 Mode = CampaignMode.Acquiring;
                 LockedChannel = b.Channel;
                 MacFilter = b.MacFilter;
-                PrimaryTarget = b.MacFilter.Count > 0 ? b.MacFilter[0] : null;
+                PrimaryTarget = b.MacFilter.Length > 0 ? b.MacFilter[0] : null;
                 ModeEnteredAt = ctx.Now;
                 if (PrimaryTarget is { } target)
                 {

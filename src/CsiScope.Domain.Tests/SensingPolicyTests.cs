@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using CsiScope.Domain.Model;
 using CsiScope.Domain.Strategy;
 using FluentAssertions;
@@ -35,8 +36,8 @@ public class SensingPolicyTests
             Liveness = liveness,
             AllNodesConverged = converged,
             LastAuditAt = lastAudit,
-            Candidates = candidates,
-            MacFilter = new[] { Target },
+            Candidates = candidates.ToImmutableArray(),
+            MacFilter = ImmutableArray.Create(Target),
         };
 
     #region Surveying

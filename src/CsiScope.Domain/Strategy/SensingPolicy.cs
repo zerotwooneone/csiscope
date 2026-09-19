@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using CsiScope.Domain.Model;
 
 namespace CsiScope.Domain.Strategy;
@@ -86,7 +87,7 @@ public static class SensingPolicy
         if (ctx.LockedChannel is { } returnTo && AuditDue(ctx, score, t))
         {
             var plan = BuildAuditPlan(ctx, t);
-            if (plan.Channels.Count > 0)
+            if (!plan.Channels.IsEmpty)
             {
                 return new SensingDecision.AuditChannels(plan, returnTo);
             }
@@ -122,6 +123,6 @@ public static class SensingPolicy
             }
         }
 
-        return new ScanPlan(channels, t.AuditDwell);
+        return new ScanPlan(channels.ToImmutableArray(), t.AuditDwell);
     }
 }

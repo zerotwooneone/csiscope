@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using CsiScope.Domain.Events;
 using CsiScope.Domain.Model;
 using CsiScope.Domain.Strategy;
@@ -19,7 +20,7 @@ public class CampaignStateTests
         Now = Now,
         ModeEnteredAt = Now,
         Confidence = confidence ?? ConfidenceScore.Full,
-        MacFilter = new[] { Target },
+        MacFilter = ImmutableArray.Create(Target),
     };
 
     #region Transitions
@@ -32,7 +33,7 @@ public class CampaignStateTests
         var ctx = Ctx(CampaignMode.Surveying);
 
         // Act
-        campaign.Apply(new SensingDecision.BeginAcquisition(Ch6, new[] { Target }), ctx);
+        campaign.Apply(new SensingDecision.BeginAcquisition(Ch6, ImmutableArray.Create(Target)), ctx);
 
         // Assert
         campaign.Mode.Should().Be(CampaignMode.Acquiring);
@@ -49,7 +50,7 @@ public class CampaignStateTests
         // Arrange
         var campaign = new CampaignState();
         var ctx = Ctx(CampaignMode.Detecting, ConfidenceScore.Zero);
-        campaign.Apply(new SensingDecision.BeginAcquisition(Ch6, new[] { Target }), ctx);
+        campaign.Apply(new SensingDecision.BeginAcquisition(Ch6, ImmutableArray.Create(Target)), ctx);
         campaign.Apply(new SensingDecision.EnterDetecting(), ctx);
         campaign.DrainEvents();
 
@@ -70,7 +71,7 @@ public class CampaignStateTests
         // Arrange
         var campaign = new CampaignState();
         var ctx = Ctx(CampaignMode.Detecting);
-        campaign.Apply(new SensingDecision.BeginAcquisition(Ch6, new[] { Target }), ctx);
+        campaign.Apply(new SensingDecision.BeginAcquisition(Ch6, ImmutableArray.Create(Target)), ctx);
         campaign.Apply(new SensingDecision.EnterDetecting(), ctx);
 
         // Act
@@ -92,12 +93,12 @@ public class CampaignStateTests
         // Arrange
         var campaign = new CampaignState();
         var ctx = Ctx(CampaignMode.Detecting);
-        campaign.Apply(new SensingDecision.BeginAcquisition(Ch6, new[] { Target }), ctx);
+        campaign.Apply(new SensingDecision.BeginAcquisition(Ch6, ImmutableArray.Create(Target)), ctx);
         campaign.Apply(new SensingDecision.EnterDetecting(), ctx);
         campaign.DrainEvents();
 
         // Act
-        var plan = new ScanPlan(new[] { Ch7 }, TimeSpan.FromMilliseconds(250));
+        var plan = new ScanPlan(ImmutableArray.Create(Ch7), TimeSpan.FromMilliseconds(250));
         campaign.Apply(new SensingDecision.AuditChannels(plan, Ch6), ctx);
 
         // Assert
@@ -117,7 +118,7 @@ public class CampaignStateTests
         // Arrange
         var campaign = new CampaignState();
         var ctx = Ctx(CampaignMode.Surveying);
-        campaign.Apply(new SensingDecision.BeginAcquisition(Ch6, new[] { Target }), ctx);
+        campaign.Apply(new SensingDecision.BeginAcquisition(Ch6, ImmutableArray.Create(Target)), ctx);
 
         // Act & Assert — events are delivered once, never replayed.
         campaign.DrainEvents().Should().HaveCount(1);
