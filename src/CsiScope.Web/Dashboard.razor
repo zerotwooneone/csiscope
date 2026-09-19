@@ -1,6 +1,7 @@
 @page "/"
 @inject SensingHostWorker Worker
 @inject IAnomalySource AnomalySource
+@inject NodeRegistryService Registry
 @implements IAsyncDisposable
 
 <PageTitle>CsiScope — Sensing Dashboard</PageTitle>
@@ -9,6 +10,78 @@
 
 <div class="container-fluid py-3">
     <h1 class="h4 mb-3 font-monospace">CsiScope <small class="text-muted">sensing campaign</small></h1>
+
+    @* Node setup — detect, assign array positions, start/stop *@
+    <div class="card mb-3">
+        <div class="card-header py-1 font-monospace d-flex justify-content-between align-items-center">
+            <span>Node Setup</span>
+            <div class="d-flex gap-2">
+                <button class="btn btn-sm btn-outline-secondary" @onclick="DetectAsync" disabled="@(_probing || Worker.IsSensing)">
+                    @(_probing ? "Probing…" : "Detect Nodes")
+                </button>
+                @if (Worker.IsSensing)
+                {
+                    <button class="btn btn-sm btn-danger" @onclick="StopSensing">Stop Sensing</button>
+                }
+                else
+                {
+                    <button class="btn btn-sm btn-success" @onclick="StartSensing" disabled="@(Registry.AssignedPorts.Count == 0)">
+                        Start Sensing
+                    </button>
+                }
+            </div>
+        </div>
+        <div class="card-body py-2">
+            @if (_probeError is not null)
+            {
+                <div class="alert alert-danger py-1 mb-2 font-monospace">Probe failed: @_probeError</div>
+            }
+            @if (_probes is null)
+            {
+                <span class="text-muted">Detect nodes to assign COM ports to array positions.</span>
+            }
+            else if (_probes.Count == 0)
+            {
+                <span class="text-warning">No serial ports found.</span>
+            }
+            else
+            {
+                <table class="table table-sm mb-0 font-monospace">
+                    <thead><tr><th>Port</th><th>Node MAC</th><th>State</th><th>Position</th></tr></thead>
+                    <tbody>
+                        @foreach (var p in _probes)
+                        {
+                            <tr>
+                                <td>@p.PortName</td>
+                                <td>
+                                    @if (p.Mac is not null)
+                                    {
+                                        <code style="color:@p.Mac.ToMacColor()">@p.Mac</code>
+                                    }
+                                    else
+                                    {
+                                        <span class="text-muted">@(p.Error ?? "—")</span>
+                                    }
+                                </td>
+                                <td>@(p.State ?? "—")</td>
+                                <td>
+                                    <select class="form-select form-select-sm" style="width:auto"
+                                            value="@(PositionOf(p.PortName) + 1)"
+                                            @onchange="e => OnPositionChanged(p.PortName, e)">
+                                        <option value="">—</option>
+                                        @for (var i = 1; i <= PositionCount; i++)
+                                        {
+                                            <option value="@i">@i</option>
+                                        }
+                                    </select>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        </div>
+    </div>
 
     @if (snapshot is null)
     {
@@ -132,7 +205,7 @@
                                         <td>
                                             <div class="progress" style="height:10px;">
                                                 <div class="progress-bar @(b.IsConverged ? "bg-success" : "bg-info")"
-                                                     style="width:@(b.FillFraction * 100).ToString("F0")%"></div>
+                                                     style="width:@((b.FillFraction * 100).ToString("F0"))%"></div>
                                             </div>
                                         </td>
                                         <td>@b.Mean.ToString("F2")</td>
@@ -178,9 +251,55 @@
     private const int MaxAnomalies = 50;
 
     private readonly List<AnomalyDetected> _recentAnomalies = new();
+    private List<ProbedNode>? _probes;
+    private string? _probeError;
+    private bool _probing;
     private PeriodicTimer? _timer;
     private CancellationTokenSource? _cts;
     private Task? _anomalyLoop;
+
+    private int PositionCount => Math.Max(4, _probes?.Count ?? 0);
+
+    private async Task DetectAsync()
+    {
+        _probing = true;
+        _probeError = null;
+        try
+        {
+            _probes = (await Registry.ProbeAllAsync()).ToList();
+        }
+        catch (Exception ex)
+        {
+            _probeError = ex.Message;
+        }
+        finally
+        {
+            _probing = false;
+        }
+    }
+
+    private int? PositionOf(string port)
+        => Registry.Assignments
+            .Where(kv => kv.Value == port)
+            .Select(kv => (int?)kv.Key)
+            .FirstOrDefault();
+
+    private void OnPositionChanged(string port, ChangeEventArgs e)
+    {
+        if (PositionOf(port) is { } current)
+        {
+            Registry.Assign(current, null);
+        }
+
+        if (int.TryParse(e.Value?.ToString(), out var pos))
+        {
+            Registry.Assign(pos - 1, port);
+        }
+    }
+
+    private void StartSensing() => Worker.StartSensing(Registry.AssignedPorts);
+
+    private void StopSensing() => Worker.StopSensing();
 
     protected override void OnInitialized()
     {

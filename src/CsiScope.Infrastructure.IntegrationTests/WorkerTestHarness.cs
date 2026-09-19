@@ -29,7 +29,6 @@ public sealed class WorkerTestHarness : IAsyncDisposable
             Orchestrator,
             Radio,
             Time,
-            portNames: new[] { "LOOPBACK1" },
             openStream: (_, _) => new ValueTask<Stream>(_port.DeviceSide),
             tickInterval: TimeSpan.FromMilliseconds(50),
             reconnectDelay: TimeSpan.FromMilliseconds(50),
@@ -45,39 +44,43 @@ public sealed class WorkerTestHarness : IAsyncDisposable
     /// <summary>Test side of the wire — write node NDJSON, read host commands.</summary>
     public Stream Node => _port.HostSide;
 
-    /// <summary>Starts the worker's pumps + consumer loop.</summary>
-    public Task StartAsync() => Worker.StartAsync(_cts.Token);
-
-    /// <summary>Writes one NDJSON line as the firmware node would.</summary>
-    public async Task WriteLineAsync(string json)
-        => await WriteRawAsync(json + "\n");
-
-    /// <summary>Writes raw bytes — for partial/torn frame tests.</summary>
-    public async Task WriteRawAsync(string text)
+    /// <summary>Starts the worker and activates a session on the loopback port.</summary>
+    public async Task StartAsync()
     {
-        await Node.WriteAsync(Encoding.UTF8.GetBytes(text));
+        await Worker.StartAsync(_cts.Token);
+        Worker.StartSensing(new[] { "LOOPBACK1" });
+    }
+
+    /// <summary>Writes one framed JSON payload as the firmware node would.</summary>
+    public async Task WriteFrameAsync(string json)
+    {
+        var frame = SerialFrameCodec.EncodeFrame(Encoding.UTF8.GetBytes(json));
+        await Node.WriteAsync(frame);
         await Node.FlushAsync();
     }
 
-    /// <summary>Reads one newline-terminated frame the host wrote to the node.</summary>
-    public async Task<string> ReadLineAsync(TimeSpan timeout)
+    /// <summary>Writes raw bytes — for partial/torn frame tests.</summary>
+    public async Task WriteRawAsync(byte[] bytes)
     {
-        var buffer = new byte[4096];
-        var line = new List<byte>();
-        using var cts = new CancellationTokenSource(timeout);
-        while (true)
-        {
-            var read = await Node.ReadAsync(buffer, cts.Token);
-            for (var i = 0; i < read; i++)
-            {
-                if (buffer[i] == (byte)'\n')
-                {
-                    return Encoding.UTF8.GetString(line.ToArray());
-                }
+        await Node.WriteAsync(bytes);
+        await Node.FlushAsync();
+    }
 
-                line.Add(buffer[i]);
-            }
+    /// <summary>Reads one framed command the host wrote to the node; returns the JSON payload.</summary>
+    public async Task<string> ReadFrameAsync(TimeSpan timeout)
+    {
+        var accum = new List<byte>();
+        var buf = new byte[4096];
+        string? result = null;
+        using var cts = new CancellationTokenSource(timeout);
+        while (result is null)
+        {
+            var read = await Node.ReadAsync(buf, cts.Token);
+            accum.AddRange(buf.Take(read));
+            SerialFrameCodec.DrainFrames(accum, p => result ??= Encoding.UTF8.GetString(p));
         }
+
+        return result;
     }
 
     /// <summary>Polls a condition on the worker's real-time loops.</summary>

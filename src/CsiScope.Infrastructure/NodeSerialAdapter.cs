@@ -118,7 +118,7 @@ public sealed class NodeSerialAdapter : IAsyncDisposable
     private async Task ExecuteAsync(OutboundCommand command)
     {
         var seq = Interlocked.Increment(ref _seq);
-        var payload = BuildSetRfFrame(command.Channel, command.MacFilter, seq);
+        var frame = SerialFrameCodec.EncodeFrame(BuildSetRfFrame(command.Channel, command.MacFilter, seq));
         bool? result = null;
 
         for (var attempt = 0; attempt < _maxAttempts && result is null; attempt++)
@@ -127,7 +127,7 @@ public sealed class NodeSerialAdapter : IAsyncDisposable
             _pendingAcks[seq] = wait;
             try
             {
-                await _writeAsync(payload, _stop.Token);
+                await _writeAsync(frame, _stop.Token);
                 // Completes true on ACK, false on NACK — both terminal.
                 result = await wait.Task.WaitAsync(_ackTimeout, _time, _stop.Token);
             }

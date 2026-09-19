@@ -37,8 +37,12 @@ public static class ServiceCollectionExtensions
             sp.GetRequiredService<IAnomalySink>(),
             expectedNodes: ImmutableArray<MacAddress>.Empty));
 
+        // Control plane — port enumeration, probing, array-position assignment.
+        services.AddSingleton<NodeRegistryService>();
+
         // Worker — singleton so Dashboard.razor can inject it, then forwarded
         // to the hosted-service registry (legacy singleton-forward pattern).
+        // Ports are NOT opened at startup — the UI drives StartSensing.
         services.AddSingleton(sp =>
         {
             var opt = sp.GetRequiredService<IOptions<SensingOptions>>().Value;
@@ -46,7 +50,6 @@ public static class ServiceCollectionExtensions
                 sp.GetRequiredService<SensingOrchestrator>(),
                 sp.GetRequiredService<BroadcastRadioAdapter>(),
                 sp.GetRequiredService<TimeProvider>(),
-                opt.SerialPortNames.ToArray(),
                 CreateSerialStreamFactory(opt.SerialBaudRate),
                 tickInterval: TimeSpan.FromMilliseconds(opt.TickIntervalMs),
                 reconnectDelay: TimeSpan.FromMilliseconds(opt.ReconnectDelayMs),

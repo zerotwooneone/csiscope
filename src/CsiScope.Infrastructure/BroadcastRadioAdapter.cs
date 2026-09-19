@@ -32,8 +32,14 @@ public sealed class BroadcastRadioAdapter : IRadioCommandPort
     public void UnregisterNode(string portKey) => _nodes.TryRemove(portKey, out _);
 
     /// <summary>Routes an ack frame to the adapter that owns the originating port.</summary>
-    public void NotifyAck(string portKey, long seq, bool success)
+    public void NotifyAck(string portKey, long seq, bool success, string? reason = null)
     {
+        if (!success)
+        {
+            _logger?.LogWarning(
+                "NACK from {Port} seq {Seq}: {Reason}", portKey, seq, reason ?? "unspecified");
+        }
+
         if (_nodes.TryGetValue(portKey, out var adapter))
         {
             adapter.NotifyAck(seq, success);

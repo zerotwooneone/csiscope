@@ -1,5 +1,4 @@
-using System.Buffers;
-using System.IO.Pipelines;
+using System.Collections.Concurrent;
 using System.Threading.Channels;
 using CsiScope.Application;
 using Microsoft.Extensions.Hosting;
@@ -24,7 +23,6 @@ namespace CsiScope.Infrastructure;
 public sealed class SensingHostWorker : BackgroundService
 {
     private const int IngressCapacity = 1000;
-    private const int MaxLineBytes = 4096; // firmware CsiJsonBufferSize ceiling
 
     // Snapshot cadence matches the Blazor polling rate — faster is wasted GC.
     private static readonly TimeSpan SnapshotInterval = TimeSpan.FromMilliseconds(333);
@@ -32,7 +30,6 @@ public sealed class SensingHostWorker : BackgroundService
     private readonly SensingOrchestrator _orchestrator;
     private readonly BroadcastRadioAdapter _radio;
     private readonly TimeProvider _time;
-    private readonly IReadOnlyList<string> _portNames;
     private readonly Func<string, CancellationToken, ValueTask<Stream>> _openStream;
     private readonly TimeSpan _tickInterval;
     private readonly TimeSpan _reconnectDelay;
@@ -40,6 +37,12 @@ public sealed class SensingHostWorker : BackgroundService
     private readonly int _maxAttempts;
     private readonly ILogger<SensingHostWorker>? _logger;
     private readonly Channel<IngressItem> _ingress;
+    private readonly ConcurrentDictionary<string, byte> _portsSeen = new();
+    private readonly SemaphoreSlim _activation = new(0, 1);
+    private readonly object _gate = new();
+    private CancellationTokenSource? _sessionCts;
+    private IReadOnlyList<string> _activePorts = Array.Empty<string>();
+    private volatile bool _isSensing;
     private SensingSnapshot? _latestSnapshot;
     private DateTimeOffset _lastSnapshotAt = DateTimeOffset.MinValue;
 
@@ -53,7 +56,6 @@ public sealed class SensingHostWorker : BackgroundService
         SensingOrchestrator orchestrator,
         BroadcastRadioAdapter radio,
         TimeProvider time,
-        IReadOnlyList<string> portNames,
         Func<string, CancellationToken, ValueTask<Stream>> openStream,
         TimeSpan? tickInterval = null,
         TimeSpan? reconnectDelay = null,
@@ -64,7 +66,6 @@ public sealed class SensingHostWorker : BackgroundService
         _orchestrator = orchestrator;
         _radio = radio;
         _time = time;
-        _portNames = portNames;
         _openStream = openStream;
         _tickInterval = tickInterval ?? TimeSpan.FromMilliseconds(100);
         _reconnectDelay = reconnectDelay ?? TimeSpan.FromSeconds(2);
@@ -78,11 +79,85 @@ public sealed class SensingHostWorker : BackgroundService
         });
     }
 
+    /// <summary>True while a sensing session is active (ports pumping).</summary>
+    public bool IsSensing => _isSensing;
+
+    /// <summary>Ports assigned to the current/last session, in array-position order.</summary>
+    public IReadOnlyList<string> ActivePorts => _activePorts;
+
+    /// <summary>
+    /// Begin pumping the given ports. Restarts cleanly if a session is already
+    /// running — existing pumps are cancelled and respawned with the new set.
+    /// </summary>
+    public void StartSensing(IReadOnlyList<string> ports)
+    {
+        lock (_gate)
+        {
+            _sessionCts?.Cancel();
+            _sessionCts?.Dispose();
+            _sessionCts = null;
+            _activePorts = ports.ToArray();
+            _isSensing = ports.Count > 0;
+        }
+
+        // Drain any stale release, then signal the supervisor once.
+        while (_activation.Wait(0)) { }
+        _activation.Release();
+    }
+
+    /// <summary>Stop all port pumps; the consumer keeps ticking so the UI still gets snapshots.</summary>
+    public void StopSensing()
+    {
+        lock (_gate)
+        {
+            _isSensing = false;
+            _activePorts = Array.Empty<string>();
+            _sessionCts?.Cancel();
+            _sessionCts?.Dispose();
+            _sessionCts = null;
+        }
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var pumps = _portNames.Select(p => PumpPortAsync(p, stoppingToken)).ToList();
-        pumps.Add(ConsumeLoopAsync(stoppingToken));
-        await Task.WhenAll(pumps);
+        await Task.WhenAll(ConsumeLoopAsync(stoppingToken), SupervisorAsync(stoppingToken));
+    }
+
+    // ---- Session supervisor: idles until StartSensing, owns pump lifetime ----
+
+    private async Task SupervisorAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            await _activation.WaitAsync(ct);
+
+            IReadOnlyList<string> ports;
+            CancellationTokenSource session;
+            lock (_gate)
+            {
+                ports = _activePorts;
+                session = new CancellationTokenSource();
+                _sessionCts = session;
+            }
+
+            _portsSeen.Clear();
+            _logger?.LogInformation("Sensing session starting on {Ports}", string.Join(", ", ports));
+
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, session.Token);
+            var pumps = ports.Select(p => PumpPortAsync(p, linked.Token)).ToList();
+            try
+            {
+                await Task.WhenAll(pumps);
+            }
+            catch (OperationCanceledException)
+            {
+                // session or host cancelled — loop back and idle
+            }
+            finally
+            {
+                session.Dispose();
+            }
+        }
     }
 
     // ---- Single-writer consumer: the ONLY thread touching the orchestrator ----
@@ -123,6 +198,11 @@ public sealed class SensingHostWorker : BackgroundService
 
     private void Dispatch(in IngressItem item)
     {
+        if (_portsSeen.TryAdd(item.Port, 0))
+        {
+            _logger?.LogInformation("First frame received from {Port} ({Kind})", item.Port, item.Frame.Kind);
+        }
+
         var now = _time.GetUtcNow();
         switch (item.Frame.Kind)
         {
@@ -131,7 +211,7 @@ public sealed class SensingHostWorker : BackgroundService
                 _orchestrator.OnAmplitudeSampleReceived(in sample);
                 break;
             case TelemetryKind.Ack:
-                _radio.NotifyAck(item.Port, item.Frame.Ack.Seq, item.Frame.Ack.Success);
+                _radio.NotifyAck(item.Port, item.Frame.Ack.Seq, item.Frame.Ack.Success, item.Frame.Ack.Reason);
                 break;
             case TelemetryKind.Config:
                 _orchestrator.RegisterExpectedNode(item.Frame.AnnouncedMac, now);
@@ -212,60 +292,42 @@ public sealed class SensingHostWorker : BackgroundService
 
     private async Task PumpStreamAsync(Stream stream, string portName, CancellationToken ct)
     {
-        var reader = PipeReader.Create(stream);
-        // Reusable line buffer — multi-segment lines copy here instead of
-        // stackalloc-ing per line (firmware caps lines at 4 KiB).
-        var lineBuffer = new byte[MaxLineBytes];
-        try
+        // The wire is binary-framed (magic + len + payload + crc), not NDJSON —
+        // accumulate raw bytes and drain complete frames.
+        var accum = new List<byte>(8192);
+        var buf = new byte[4096];
+        var loggedFirstBytes = false;
+
+        while (!ct.IsCancellationRequested)
         {
-            while (!ct.IsCancellationRequested)
+            var n = await stream.ReadAsync(buf, ct);
+            if (n == 0)
             {
-                var result = await reader.ReadAsync(ct);
-                var buffer = result.Buffer;
-                var consumed = ProcessBuffer(ref buffer, lineBuffer, portName);
-                reader.AdvanceTo(consumed, buffer.End);
-                if (result.IsCompleted)
-                {
-                    break;
-                }
+                break; // stream closed
             }
-        }
-        finally
-        {
-            await reader.CompleteAsync();
+
+            if (!loggedFirstBytes)
+            {
+                loggedFirstBytes = true;
+                _logger?.LogInformation(
+                    "First bytes from {Port}: {Preview}", portName, AsciiPreview(buf.AsSpan(0, n)));
+            }
+
+            accum.AddRange(buf.AsSpan(0, n).ToArray());
+            SerialFrameCodec.DrainFrames(accum, p => Enqueue(p, portName));
         }
     }
 
-    private SequencePosition ProcessBuffer(ref ReadOnlySequence<byte> buffer, byte[] lineBuffer, string portName)
+    private static string AsciiPreview(ReadOnlySpan<byte> span)
     {
-        var reader = new SequenceReader<byte>(buffer);
-        while (reader.TryReadTo(out ReadOnlySequence<byte> line, (byte)'\n'))
+        var len = Math.Min(64, span.Length);
+        var chars = new char[len];
+        for (var i = 0; i < len; i++)
         {
-            if (line.Length is 0 or > MaxLineBytes)
-            {
-                continue;
-            }
-
-            // Strip a trailing \r so CRLF firmware also parses.
-            if (line.Slice(line.Length - 1, 1).FirstSpan[0] == (byte)'\r')
-            {
-                line = line.Slice(0, line.Length - 1);
-            }
-
-            if (line.IsSingleSegment)
-            {
-                Enqueue(line.FirstSpan, portName);
-            }
-            else
-            {
-                line.CopyTo(lineBuffer);
-                Enqueue(lineBuffer.AsSpan(0, (int)line.Length), portName);
-            }
+            chars[i] = span[i] is >= 0x20 and < 0x7F ? (char)span[i] : '.';
         }
 
-        var consumed = reader.Position;
-        buffer = buffer.Slice(consumed);
-        return consumed;
+        return new string(chars);
     }
 
     private void Enqueue(ReadOnlySpan<byte> line, string portName)

@@ -11,8 +11,8 @@ public enum TelemetryKind : byte
     Heartbeat,
 }
 
-/// <summary>Decoded <c>{"type":"ack"}</c> frame — seq matches the outbound command.</summary>
-public readonly record struct CommandAck(long Seq, bool Success);
+/// <summary>Decoded <c>{"type":"ack"}</c> frame — seq matches the outbound command; reason explains NACKs.</summary>
+public readonly record struct CommandAck(long Seq, bool Success, string? Reason = null);
 
 /// <summary>
 /// One decoded NDJSON line. <see cref="Kind"/> selects the meaningful field:
@@ -45,6 +45,7 @@ public static class TelemetryParser
         var rssi = 0;
         long seq = 0;
         var success = false;
+        string? reason = null;
         var hasMac = false;
         var hasSrc = false;
         var hasChannel = false;
@@ -145,6 +146,15 @@ public static class TelemetryParser
                     success = reader.TokenType == JsonTokenType.True;
                     hasSuccess = true;
                 }
+                else if (reader.ValueTextEquals("reason"u8))
+                {
+                    if (!reader.Read() || reader.TokenType != JsonTokenType.String)
+                    {
+                        return false;
+                    }
+
+                    reason = reader.GetString();
+                }
                 else if (reader.ValueTextEquals("c"u8))
                 {
                     // Stream the I/Q array — reduce to mean magnitude inline.
@@ -197,7 +207,7 @@ public static class TelemetryParser
                 result = new ParsedTelemetry
                 {
                     Kind = TelemetryKind.Ack,
-                    Ack = new CommandAck(seq, success),
+                    Ack = new CommandAck(seq, success, reason),
                 };
                 return true;
 

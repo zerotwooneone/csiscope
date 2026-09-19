@@ -27,7 +27,13 @@ public class NodeSerialAdapterTests
         return (adapter, sent);
     }
 
-    private static string SentJson(byte[] frame) => Encoding.UTF8.GetString(frame).TrimEnd('\n');
+    private static string SentJson(byte[] frame)
+    {
+        var accum = frame.ToList();
+        string? json = null;
+        SerialFrameCodec.DrainFrames(accum, p => json ??= Encoding.UTF8.GetString(p));
+        return json!;
+    }
 
     #region Wire Format
 
@@ -42,7 +48,7 @@ public class NodeSerialAdapterTests
         var pending = adapter.SendSetRfAsync(Ch6, ImmutableArray.Create(Target));
         await WaitFor(() => sent.Count == 1);
 
-        // Assert — passive schema: ch, bw, mode, seq, mac_filter, newline-framed.
+        // Assert — passive schema: ch, bw, mode, seq, mac_filter, binary-framed.
         var json = SentJson(sent.First());
         json.Should().Contain("\"cmd\":\"set_rf\"");
         json.Should().Contain("\"ch\":6");
@@ -50,7 +56,8 @@ public class NodeSerialAdapterTests
         json.Should().Contain("\"mode\":\"passive\"");
         json.Should().Contain("\"mac_filter\":[\"08E9F6639ACC\"]");
         json.Should().Contain("\"seq\":");
-        sent.First()[^1].Should().Be((byte)'\n');
+        sent.First()[0].Should().Be(SerialFrameCodec.MagicHigh);
+        sent.First()[1].Should().Be(SerialFrameCodec.MagicLow);
 
         adapter.NotifyAck(1, true);
         (await pending).Should().BeTrue();
