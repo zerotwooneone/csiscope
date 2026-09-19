@@ -11,13 +11,13 @@
 <div class="container-fluid py-3">
     <h1 class="h4 mb-3 font-monospace">CsiScope <small class="text-muted">sensing campaign</small></h1>
 
-    @* Node setup — detect, assign array positions, start/stop *@
+    @* Array setup — drag detected nodes onto mounts; persisted to array_geometry.json *@
     <div class="card mb-3">
         <div class="card-header py-1 font-monospace d-flex justify-content-between align-items-center">
-            <span>Node Setup</span>
+            <span>Array Setup</span>
             <div class="d-flex gap-2">
                 <button class="btn btn-sm btn-outline-secondary" @onclick="DetectAsync" disabled="@(_probing || Worker.IsSensing)">
-                    @(_probing ? "Probing…" : "Detect Nodes")
+                    @(_probing ? "Scanning…" : "Rescan")
                 </button>
                 @if (Worker.IsSensing)
                 {
@@ -36,50 +36,53 @@
             {
                 <div class="alert alert-danger py-1 mb-2 font-monospace">Probe failed: @_probeError</div>
             }
-            @if (_probes is null)
-            {
-                <span class="text-muted">Detect nodes to assign COM ports to array positions.</span>
-            }
-            else if (_probes.Count == 0)
-            {
-                <span class="text-warning">No serial ports found.</span>
-            }
-            else
-            {
-                <table class="table table-sm mb-0 font-monospace">
-                    <thead><tr><th>Port</th><th>Node MAC</th><th>State</th><th>Position</th></tr></thead>
-                    <tbody>
-                        @foreach (var p in _probes)
-                        {
-                            <tr>
-                                <td>@p.PortName</td>
-                                <td>
-                                    @if (p.Mac is not null)
-                                    {
-                                        <code style="color:@p.Mac.ToMacColor()">@p.Mac</code>
-                                    }
-                                    else
-                                    {
-                                        <span class="text-muted">@(p.Error ?? "—")</span>
-                                    }
-                                </td>
-                                <td>@(p.State ?? "—")</td>
-                                <td>
-                                    <select class="form-select form-select-sm" style="width:auto"
-                                            value="@(PositionOf(p.PortName) + 1)"
-                                            @onchange="e => OnPositionChanged(p.PortName, e)">
-                                        <option value="">—</option>
-                                        @for (var i = 1; i <= PositionCount; i++)
-                                        {
-                                            <option value="@i">@i</option>
-                                        }
-                                    </select>
-                                </td>
-                            </tr>
-                        }
-                    </tbody>
-                </table>
-            }
+            <p class="text-muted small mb-2">
+                Drag a node onto a mount. Dropping onto an occupied mount swaps it; drag back to the tray to unassign.
+            </p>
+            <div class="d-flex flex-wrap gap-4 align-items-start">
+                <div class="geom-board">
+                    <svg class="geom-arms" viewBox="0 0 160 160" aria-hidden="true">
+                        <line x1="32" y1="128" x2="128" y2="128" />
+                        <line x1="32" y1="128" x2="32" y2="32" />
+                    </svg>
+                    @foreach (var slot in GeometrySlots)
+                    {
+                        var slotMac = Registry.GetSlotMac(slot.Id);
+                        <div class="geom-slot @(slotMac is null ? "geom-slot-empty" : null) @(_dragOverSlot == slot.Id ? "geom-over" : null)"
+                             style="left:@(slot.Left)px; top:@(slot.Top)px;"
+                             @ondragover:preventDefault
+                             @ondragenter="() => _dragOverSlot = slot.Id"
+                             @ondragleave="() => _dragOverSlot = null"
+                             @ondrop="() => OnGeometryDrop(slot.Id)">
+                            @if (slotMac is null)
+                            {
+                                <span class="geom-slot-label">@slot.Label</span>
+                            }
+                            else
+                            {
+                                @NodeChip(slotMac)
+                                <span class="geom-slot-tag">@slot.Label</span>
+                            }
+                        </div>
+                    }
+                </div>
+                @{ var unassigned = GetUnassignedMacs().ToList(); }
+                <div class="geom-tray @(_dragOverTray ? "geom-over" : null)"
+                     @ondragover:preventDefault
+                     @ondragenter="() => _dragOverTray = true"
+                     @ondragleave="() => _dragOverTray = false"
+                     @ondrop="OnTrayDrop">
+                    <div class="geom-tray-title">Detected nodes</div>
+                    @if (unassigned.Count == 0)
+                    {
+                        <div class="geom-tray-empty">No unassigned nodes</div>
+                    }
+                    @foreach (var mac in unassigned)
+                    {
+                        @NodeChip(mac)
+                    }
+                </div>
+            </div>
         </div>
     </div>
 
@@ -251,14 +254,25 @@
     private const int MaxAnomalies = 50;
 
     private readonly List<AnomalyDetected> _recentAnomalies = new();
-    private List<ProbedNode>? _probes;
     private string? _probeError;
     private bool _probing;
     private PeriodicTimer? _timer;
     private CancellationTokenSource? _cts;
     private Task? _anomalyLoop;
 
-    private int PositionCount => Math.Max(4, _probes?.Count ?? 0);
+    private string? _draggedMac;
+    private int? _dragOverSlot;
+    private bool _dragOverTray;
+
+    private sealed record GeometrySlotInfo(int Id, string Label, int Left, int Top);
+
+    // L-array: origin bottom-left, +X right, +Y up — mirrors the physical array.
+    private static readonly GeometrySlotInfo[] GeometrySlots =
+    {
+        new(0, "Origin", 32, 128),
+        new(1, "+X", 128, 128),
+        new(2, "+Y", 32, 32),
+    };
 
     private async Task DetectAsync()
     {
@@ -266,7 +280,7 @@
         _probeError = null;
         try
         {
-            _probes = (await Registry.ProbeAllAsync()).ToList();
+            await Registry.ProbeAllAsync();
         }
         catch (Exception ex)
         {
@@ -278,24 +292,67 @@
         }
     }
 
-    private int? PositionOf(string port)
-        => Registry.Assignments
-            .Where(kv => kv.Value == port)
-            .Select(kv => (int?)kv.Key)
-            .FirstOrDefault();
-
-    private void OnPositionChanged(string port, ChangeEventArgs e)
+    private int? FindSlot(string mac)
     {
-        if (PositionOf(port) is { } current)
+        for (var i = 0; i < Registry.SlotCount; i++)
         {
-            Registry.Assign(current, null);
+            if (string.Equals(Registry.GetSlotMac(i), mac, StringComparison.OrdinalIgnoreCase))
+            {
+                return i;
+            }
         }
 
-        if (int.TryParse(e.Value?.ToString(), out var pos))
-        {
-            Registry.Assign(pos - 1, port);
-        }
+        return null;
     }
+
+    private IEnumerable<string> GetUnassignedMacs()
+        => Registry.Probes
+            .Where(p => p.Mac is not null)
+            .Select(p => p.Mac!)
+            .Where(m => FindSlot(m) is null);
+
+    private void OnGeometryDrop(int target)
+    {
+        if (_draggedMac is null)
+        {
+            return;
+        }
+
+        var source = FindSlot(_draggedMac);
+        var displaced = Registry.GetSlotMac(target);
+        Registry.Assign(target, _draggedMac);
+        if (source is { } s && displaced is not null)
+        {
+            Registry.Assign(s, displaced);
+        }
+
+        _draggedMac = null;
+        _dragOverSlot = null;
+    }
+
+    private void OnTrayDrop()
+    {
+        if (_draggedMac is not null && FindSlot(_draggedMac) is { } source)
+        {
+            Registry.Assign(source, null);
+        }
+
+        _draggedMac = null;
+        _dragOverTray = false;
+    }
+
+    private RenderFragment NodeChip(string mac)
+    {
+        var port = Registry.PortForMac(mac);
+        return @<div class="geom-chip" style="background-color:@(mac.ToMacColor())" draggable="true"
+                    @ondragstart="() => _draggedMac = mac"
+                    @ondragend="() => _draggedMac = null">
+                    <span class="geom-chip-mac">@MacLast4(mac)</span>
+                    <span class="geom-chip-port">@(port ?? "?")</span>
+                </div>;
+    }
+
+    private static string MacLast4(string mac) => mac.Replace(":", "")[^4..];
 
     private void StartSensing() => Worker.StartSensing(Registry.AssignedPorts);
 
@@ -307,6 +364,13 @@
         _timer = new PeriodicTimer(TimeSpan.FromMilliseconds(333));
         _ = PollLoop();
         _anomalyLoop = ConsumeAnomaliesAsync(_cts.Token);
+
+        // Auto-probe once — if configured MACs are found on their ports,
+        // assignment is automatic and no manual detect is needed.
+        if (!_probing && !Worker.IsSensing && Registry.Probes.Count == 0)
+        {
+            _ = DetectAsync();
+        }
     }
 
     private static string ModeBadge(CampaignMode mode) => mode switch

@@ -1,6 +1,6 @@
 using System.IO.Ports;
-using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -16,71 +16,136 @@ public sealed record ProbedNode(
     string? Error);
 
 /// <summary>
-/// Control-plane for node discovery and array assignment. Enumerates COM
-/// ports, probes each with get_config (the firmware announces itself via
-/// config/hb frames), and tracks position → port assignments. Probing must
-/// only run while the worker is stopped — the worker owns assigned ports
-/// during a session.
+/// Control-plane for node discovery and array assignment. Persists the
+/// position → MAC geometry to <c>array_geometry.json</c>, probes COM ports for
+/// the MAC on each, and derives position → port assignments by matching probed
+/// MACs against the configured geometry. When every configured MAC is found on
+/// a port, assignment is fully automatic — no manual detect step needed.
 /// </summary>
 public sealed class NodeRegistryService
 {
     private static readonly TimeSpan ProbeWindow = TimeSpan.FromSeconds(2);
 
+    private static readonly JsonSerializerOptions SerializerOptions = new()
+    {
+        WriteIndented = true,
+    };
+
     private readonly int _baudRate;
+    private readonly string _geometryPath;
     private readonly object _gate = new();
-    private readonly Dictionary<int, string> _assignments = new(); // position → port
+    private readonly List<string?> _geometry;   // position → MAC (persisted)
+    private List<ProbedNode> _probes = new();   // port → MAC (runtime)
     private readonly ILogger<NodeRegistryService>? _logger;
 
-    public NodeRegistryService(IOptions<SensingOptions> options, ILogger<NodeRegistryService>? logger = null)
+    public NodeRegistryService(
+        IOptions<SensingOptions> options,
+        IHostEnvironment environment,
+        ILogger<NodeRegistryService>? logger = null)
     {
         _baudRate = options.Value.SerialBaudRate;
         _logger = logger;
+        _geometryPath = Path.Combine(environment.ContentRootPath, "array_geometry.json");
+        _geometry = LoadGeometry();
+    }
 
-        // Seed assignments from configured port order — position i gets the
-        // i-th configured port, preserving the legacy deployment layout.
-        var seed = options.Value.SerialPortNames;
-        for (var i = 0; i < seed.Count; i++)
+    /// <summary>Number of array positions (slots).</summary>
+    public int SlotCount
+    {
+        get { lock (_gate) { return _geometry.Count; } }
+    }
+
+    /// <summary>MAC assigned to a position, or null if empty.</summary>
+    public string? GetSlotMac(int position)
+    {
+        lock (_gate)
         {
-            _assignments[i] = seed[i];
+            return position >= 0 && position < _geometry.Count ? _geometry[position] : null;
         }
     }
 
-    /// <summary>Position → port assignments (0-based positions).</summary>
-    public IReadOnlyDictionary<int, string> Assignments
+    /// <summary>Latest probe results (port → MAC).</summary>
+    public IReadOnlyList<ProbedNode> Probes
     {
-        get { lock (_gate) { return new Dictionary<int, string>(_assignments); } }
+        get { lock (_gate) { return _probes.ToArray(); } }
     }
 
-    /// <summary>Assigned ports ordered by array position — the worker's session set.</summary>
+    /// <summary>COM port a probed MAC was found on, or null.</summary>
+    public string? PortForMac(string mac)
+    {
+        lock (_gate)
+        {
+            return _probes.FirstOrDefault(p =>
+                string.Equals(p.Mac, mac, StringComparison.OrdinalIgnoreCase))?.PortName;
+        }
+    }
+
+    /// <summary>MAC found on a probed port, or null.</summary>
+    public string? MacForPort(string portName)
+    {
+        lock (_gate)
+        {
+            return _probes.FirstOrDefault(p =>
+                string.Equals(p.PortName, portName, StringComparison.OrdinalIgnoreCase))?.Mac;
+        }
+    }
+
+    /// <summary>
+    /// Assigned ports ordered by array position — the worker's session set.
+    /// Derived: position → configured MAC → probed port.
+    /// </summary>
     public IReadOnlyList<string> AssignedPorts
     {
         get
         {
             lock (_gate)
             {
-                return _assignments.OrderBy(kv => kv.Key).Select(kv => kv.Value).ToArray();
+                return _geometry
+                    .Select(mac => mac is null ? null : PortForMacUnsafe(mac))
+                    .Where(p => p is not null)
+                    .Select(p => p!)
+                    .ToArray();
             }
         }
     }
 
-    /// <summary>Assign a port to an array position (null clears the position).</summary>
-    public void Assign(int position, string? portName)
+    /// <summary>True when every configured position's MAC was found on a port.</summary>
+    public bool AllAssigned
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _geometry.All(m => m is null || PortForMacUnsafe(m) is not null)
+                    && _geometry.Any(m => m is not null);
+            }
+        }
+    }
+
+    /// <summary>Assign a MAC to a position (null clears). Persists geometry.</summary>
+    public void Assign(int position, string? mac)
     {
         lock (_gate)
         {
-            if (portName is null)
+            if (position < 0 || position >= _geometry.Count)
             {
-                _assignments.Remove(position);
                 return;
             }
 
-            // A port can only hold one position — clear any existing claim.
-            foreach (var kv in _assignments.Where(kv => kv.Value == portName).ToArray())
+            if (mac is not null)
             {
-                _assignments.Remove(kv.Key);
+                // A MAC holds one position — clear any existing claim.
+                for (var i = 0; i < _geometry.Count; i++)
+                {
+                    if (string.Equals(_geometry[i], mac, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _geometry[i] = null;
+                    }
+                }
             }
 
-            _assignments[position] = portName;
+            _geometry[position] = mac;
+            SaveGeometry();
         }
     }
 
@@ -92,8 +157,8 @@ public sealed class NodeRegistryService
             .ToArray();
 
     /// <summary>
-    /// Opens a port, sends get_config, and listens for a config/hb frame.
-    /// Never throws — failures surface as <see cref="ProbedNode.Error"/>.
+    /// Opens a port, sends a framed get_config, and listens for any mac-bearing
+    /// frame. Never throws — failures surface as <see cref="ProbedNode.Error"/>.
     /// </summary>
     public async Task<ProbedNode> ProbeAsync(string portName, CancellationToken ct = default)
     {
@@ -107,13 +172,59 @@ public sealed class NodeRegistryService
         }
     }
 
-    /// <summary>Probes every enumerated port in parallel.</summary>
+    /// <summary>Probes every enumerated port in parallel and records the results.</summary>
     public async Task<IReadOnlyList<ProbedNode>> ProbeAllAsync(CancellationToken ct = default)
     {
         var ports = EnumeratePorts();
         var results = await Task.WhenAll(ports.Select(p => ProbeAsync(p, ct)));
+        lock (_gate)
+        {
+            _probes = results.ToList();
+        }
+
         return results;
     }
+
+    // ---- persistence ----
+
+    private List<string?> LoadGeometry()
+    {
+        try
+        {
+            if (File.Exists(_geometryPath))
+            {
+                var doc = JsonDocument.Parse(File.ReadAllText(_geometryPath));
+                if (doc.RootElement.TryGetProperty("Positions", out var arr))
+                {
+                    return arr.EnumerateArray()
+                        .Select(e => e.ValueKind == JsonValueKind.String ? e.GetString() : null)
+                        .ToList();
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Failed to load array geometry from {Path}", _geometryPath);
+        }
+
+        // Default: three positions matching the L-array (origin, +X, +Y).
+        return new List<string?> { null, null, null };
+    }
+
+    private void SaveGeometry()
+    {
+        try
+        {
+            var payload = new { Positions = _geometry };
+            File.WriteAllText(_geometryPath, JsonSerializer.Serialize(payload, SerializerOptions));
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Failed to save array geometry to {Path}", _geometryPath);
+        }
+    }
+
+    // ---- probing ----
 
     private ProbedNode ProbeCore(string portName, CancellationToken ct)
     {
@@ -179,7 +290,7 @@ public sealed class NodeRegistryService
     {
         try
         {
-            using var doc = JsonDocument.Parse(Encoding.UTF8.GetString(payload));
+            using var doc = JsonDocument.Parse(System.Text.Encoding.UTF8.GetString(payload));
             var root = doc.RootElement;
 
             // Any frame carrying a node MAC is proof of life — a streaming node
@@ -202,6 +313,10 @@ public sealed class NodeRegistryService
             return null;
         }
     }
+
+    private string? PortForMacUnsafe(string mac)
+        => _probes.FirstOrDefault(p =>
+            string.Equals(p.Mac, mac, StringComparison.OrdinalIgnoreCase))?.PortName;
 
     private static int NumericSuffix(string name)
     {
