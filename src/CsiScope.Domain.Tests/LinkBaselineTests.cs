@@ -83,11 +83,18 @@ public class LinkBaselineTests
     {
         // Arrange — converged on a quiet floor, then a sustained
         // elevated-variance stream (alternates ±0.5 -> variance ~0.25).
-        var baseline = ConvergedBaseline();
+        // Small relock budget so the test isn't pinned to the default constant.
+        var baseline = new LinkBaseline(Link, new BaselineTunables { RelockAfterMisses = 10 });
+        for (var i = 0; i < BaselineTunables.DefaultWindowSize; i++)
+        {
+            baseline.Observe(Sample(i % 2 == 0 ? 1.00 : 1.02, i * 10));
+        }
+
+        baseline.IsConverged.Should().BeTrue();
         double originalFloor = baseline.Floor.Value;
 
         // Act
-        for (var i = 0; i < 140; i++)
+        for (var i = 0; i < 15; i++)
         {
             baseline.Observe(Sample(i % 2 == 0 ? 1.5 : 0.5, 20_000 + (i * 10)));
         }
@@ -119,14 +126,41 @@ public class LinkBaselineTests
     [Fact]
     public void Tripwire_respects_per_link_cooldown()
     {
-        // Arrange
+        // Arrange — explicit 100ms cooldown so the test isn't pinned to the default.
+        var baseline = new LinkBaseline(Link, new BaselineTunables { TripwireCooldown = TimeSpan.FromMilliseconds(100) });
+        for (var i = 0; i < BaselineTunables.DefaultWindowSize; i++)
+        {
+            baseline.Observe(Sample(i % 2 == 0 ? 1.00 : 1.02, i * 10));
+        }
+
+        baseline.Observe(Sample(5.0, 10_000)).Should().NotBeNull();
+
+        // Act & Assert — second spike 50ms later is inside the cooldown;
+        // a third after the cooldown fires again.
+        baseline.Observe(Sample(5.0, 10_050)).Should().BeNull();
+        baseline.Observe(Sample(5.0, 10_200)).Should().NotBeNull();
+    }
+
+    #endregion
+
+    #region Reset
+
+    [Fact]
+    public void Reset_clears_all_state_for_reacquire()
+    {
+        // Arrange — converged baseline that has also tripped (cooldown stamped).
         var baseline = ConvergedBaseline();
         baseline.Observe(Sample(5.0, 10_000)).Should().NotBeNull();
 
-        // Act & Assert — second spike 500ms later is inside the cooldown;
-        // a third after the cooldown fires again.
-        baseline.Observe(Sample(5.0, 10_500)).Should().BeNull();
-        baseline.Observe(Sample(5.0, 12_000)).Should().NotBeNull();
+        // Act
+        baseline.Reset();
+
+        // Assert — window, floor, latch, and cooldown all cleared.
+        baseline.TotalFrames.Should().Be(0);
+        baseline.FillFraction.Should().Be(0);
+        baseline.IsConverged.Should().BeFalse();
+        baseline.Floor.Value.Should().Be(0);
+        baseline.LastFrameAt.Should().Be(DateTimeOffset.MinValue);
     }
 
     #endregion

@@ -277,6 +277,24 @@ public class SensingPolicyTests
     }
 
     [Fact]
+    public void Detecting_mid_confidence_reacquires_instead_of_auditing()
+    {
+        // Arrange — Value ~0.29: below the reacquire gate, above abandon.
+        // Audit would be due (120s elapsed) — reacquire must win the ordering.
+        var ctx = Ctx(CampaignMode.Detecting, locked: Ch6,
+            confidence: new ConfidenceScore(0.6, 0.6, 0.9, 0.9),
+            liveness: new ChannelLiveness(Ch6, 100, Now),
+            lastAudit: Now - TimeSpan.FromSeconds(120),
+            candidates: new[] { new ChannelCandidate(Ch7, Target, new ActivityScore(5.0)) });
+
+        // Act
+        var decision = SensingPolicy.Decide(ctx);
+
+        // Assert
+        decision.Should().BeOfType<SensingDecision.Reacquire>();
+    }
+
+    [Fact]
     public void Detecting_collapsed_confidence_dead_air_fast_skips()
     {
         // Arrange

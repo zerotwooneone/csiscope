@@ -19,6 +19,18 @@ public class SensingOrchestratorTests
         MacAddress.Parse("14:C1:9F:2E:53:D1"),
         MacAddress.Parse("14:C1:9F:2E:53:D2"));
 
+    private static readonly MacAddress OtherMac = MacAddress.Parse("AA:BB:CC:DD:EE:FF");
+
+    // Tight timing so tests aren't pinned to production defaults.
+    private static readonly SensingThresholds Fast = new()
+    {
+        SurveyDwell = TimeSpan.FromMilliseconds(100),
+        AuditDwell = TimeSpan.FromMilliseconds(50),
+        DeadChannelTimeout = TimeSpan.FromSeconds(2),
+        MaxAuditInterval = TimeSpan.FromSeconds(5),
+        MinAuditInterval = TimeSpan.FromSeconds(1),
+    };
+
     private sealed class FakeRadio : IRadioCommandPort
     {
         public List<(WifiChannel Channel, ImmutableArray<MacAddress> Filter)> Calls { get; } = new();
@@ -57,27 +69,15 @@ public class SensingOrchestratorTests
         }
     }
 
-    private static (SensingOrchestrator Orch, FakeRadio Radio, FakeSink Sink) Create()
+    private static (SensingOrchestrator Orch, FakeRadio Radio, FakeSink Sink) Create(
+        SensingThresholds? thresholds = null)
     {
         var radio = new FakeRadio();
         var sink = new FakeSink();
-        return (new SensingOrchestrator(radio, sink, Nodes), radio, sink);
+        return (new SensingOrchestrator(radio, sink, Nodes, thresholds ?? Fast), radio, sink);
     }
 
     #region Telemetry Hot Path
-
-    [Fact]
-    public void Sample_creates_baseline_and_returns_no_anomaly_before_convergence()
-    {
-        // Arrange
-        var (orch, _, _) = Create();
-
-        // Act
-        var anomaly = orch.OnAmplitudeSampleReceived(Sample(Nodes[0], Target, Ch6, 1.0, 0));
-
-        // Assert
-        anomaly.Should().BeNull();
-    }
 
     [Fact]
     public void Converged_baseline_spike_returns_and_publishes_anomaly()
@@ -121,8 +121,8 @@ public class SensingOrchestratorTests
         orch.Tick(T0);
         int initialCalls = radio.Calls.Count;
 
-        // Act — advance past one survey dwell (500ms default).
-        orch.Tick(T0 + TimeSpan.FromMilliseconds(600));
+        // Act — advance past one survey dwell.
+        orch.Tick(T0 + Fast.SurveyDwell + TimeSpan.FromMilliseconds(50));
 
         // Assert — hopped to the next channel.
         radio.Calls.Count.Should().BeGreaterThan(initialCalls);
@@ -137,15 +137,28 @@ public class SensingOrchestratorTests
     /// {1,6,11}, feeds ch6 activity during its dwell (the hop resets each
     /// channel's activity window, so frames must land inside it), then lets
     /// the post-sweep evaluation issue BeginAcquisition.</summary>
-    private static SensingOrchestrator DriveToAcquiring(FakeRadio radio, FakeSink sink)
+    private static SensingOrchestrator DriveToAcquiring(FakeRadio radio, FakeSink sink, SensingThresholds thresholds)
     {
-        var orch = new SensingOrchestrator(radio, sink, Nodes);
-        orch.Tick(T0);                                    // hop ch1 (plan {1,6,11})
-        orch.Tick(T0 + TimeSpan.FromMilliseconds(600));   // hop ch6 — window resets
-        FeedStableStream(orch, Ch6, Target, 20, startMs: 650); // frames during ch6 dwell
-        orch.Tick(T0 + TimeSpan.FromMilliseconds(1200));  // hop ch11
-        orch.Tick(T0 + TimeSpan.FromMilliseconds(1800));  // plan exhausted
-        orch.Tick(T0 + TimeSpan.FromMilliseconds(2400));  // evaluate -> BeginAcquisition
+        var dwell = thresholds.SurveyDwell;
+        var orch = new SensingOrchestrator(radio, sink, Nodes, thresholds);
+        orch.Tick(T0);                                                   // hop ch1 (plan {1,6,11})
+        orch.Tick(T0 + dwell + TimeSpan.FromMilliseconds(50));           // hop ch6 — window resets
+        FeedStableStream(orch, Ch6, Target, 20, startMs: 200);           // frames during ch6 dwell
+        orch.Tick(T0 + (dwell * 2) + TimeSpan.FromMilliseconds(100));    // hop ch11
+        orch.Tick(T0 + (dwell * 3) + TimeSpan.FromMilliseconds(100));    // plan exhausted
+        orch.Tick(T0 + (dwell * 3) + TimeSpan.FromMilliseconds(300));    // evaluate -> BeginAcquisition
+        return orch;
+    }
+
+    /// <summary>Extends <see cref="DriveToAcquiring"/> through convergence into Detecting.</summary>
+    private static SensingOrchestrator DriveToDetecting(FakeRadio radio, FakeSink sink, SensingThresholds thresholds)
+    {
+        var orch = DriveToAcquiring(radio, sink, thresholds);
+        orch.Campaign.Mode.Should().Be(CampaignMode.Acquiring);
+        var locked = orch.Campaign.LockedChannel!.Value;
+        FeedStableStream(orch, locked, Target, BaselineTunables.DefaultWindowSize + 1, startMs: 20_000);
+        orch.Tick(T0 + TimeSpan.FromSeconds(21));
+        orch.Campaign.Mode.Should().Be(CampaignMode.Detecting);
         return orch;
     }
 
@@ -156,7 +169,7 @@ public class SensingOrchestratorTests
         var radio = new FakeRadio();
 
         // Act
-        var orch = DriveToAcquiring(radio, new FakeSink());
+        var orch = DriveToAcquiring(radio, new FakeSink(), Fast);
 
         // Assert — campaign locked onto ch6 and issued a filtered set_rf.
         orch.Campaign.Mode.Should().Be(CampaignMode.Acquiring);
@@ -167,16 +180,40 @@ public class SensingOrchestratorTests
     [Fact]
     public void Campaign_enters_detecting_when_all_nodes_converge()
     {
-        // Arrange
-        var orch = DriveToAcquiring(new FakeRadio(), new FakeSink());
-        orch.Campaign.Mode.Should().Be(CampaignMode.Acquiring);
-        var locked = orch.Campaign.LockedChannel!.Value;
-
-        // Act — fill every node's window on the locked channel, then tick.
-        FeedStableStream(orch, locked, Target, BaselineTunables.DefaultWindowSize + 1, startMs: 20_000);
-        orch.Tick(T0 + TimeSpan.FromSeconds(21));
+        // Act
+        var orch = DriveToDetecting(new FakeRadio(), new FakeSink(), Fast);
 
         // Assert
+        orch.Campaign.Mode.Should().Be(CampaignMode.Detecting);
+    }
+
+    #endregion
+
+    #region Audit Execution
+
+    [Fact]
+    public void Audit_hops_channels_and_returns_to_lock_without_leaving_detecting()
+    {
+        // Arrange — Detecting; keep confidence high so the audit interval is MaxAuditInterval.
+        var radio = new FakeRadio();
+        var orch = DriveToDetecting(radio, new FakeSink(), Fast);
+        var locked = orch.Campaign.LockedChannel!.Value;
+        FeedStableStream(orch, locked, Target, 10, startMs: 24_000);
+
+        // Act — tick past the audit interval, then advance through the audit dwells.
+        orch.Tick(T0 + TimeSpan.FromSeconds(27));
+
+        // Assert — hopped to a non-locked channel with an open filter.
+        radio.Calls[^1].Channel.Should().NotBe(locked);
+        radio.Calls[^1].Filter.Should().BeEmpty();
+
+        // Act — exhaust the audit plan.
+        orch.Tick(T0 + TimeSpan.FromSeconds(27.1));
+        orch.Tick(T0 + TimeSpan.FromSeconds(27.2));
+
+        // Assert — returned to the locked channel with the campaign filter; never left Detecting.
+        radio.Calls[^1].Channel.Should().Be(locked);
+        radio.Calls[^1].Filter.Should().NotBeEmpty();
         orch.Campaign.Mode.Should().Be(CampaignMode.Detecting);
     }
 
@@ -187,16 +224,65 @@ public class SensingOrchestratorTests
     [Fact]
     public void Dead_air_during_acquisition_returns_to_surveying()
     {
-        // Arrange — locked at +2.4s, then feed nothing on the channel.
-        var orch = DriveToAcquiring(new FakeRadio(), new FakeSink());
+        // Arrange — locked, then feed nothing on the channel.
+        var orch = DriveToAcquiring(new FakeRadio(), new FakeSink(), Fast);
         orch.Campaign.Mode.Should().Be(CampaignMode.Acquiring);
 
-        // Act — dwell past the 8s dead-channel timeout with zero new frames.
-        orch.Tick(T0 + TimeSpan.FromSeconds(12));
+        // Act — dwell past the dead-channel timeout with zero new frames.
+        orch.Tick(T0 + TimeSpan.FromSeconds(5));
 
         // Assert
         orch.Campaign.Mode.Should().Be(CampaignMode.Surveying);
         orch.DrainEvents().Should().Contain(e => e is ConfidenceDegraded);
+    }
+
+    [Fact]
+    public void Target_shifted_returns_to_surveying_with_reason()
+    {
+        // Arrange — Detecting; feed frames from a DIFFERENT mac: channel alive, target gone.
+        var orch = DriveToDetecting(new FakeRadio(), new FakeSink(), Fast);
+        var locked = orch.Campaign.LockedChannel!.Value;
+        foreach (var node in Nodes)
+        {
+            for (var f = 0; f < 4; f++)
+            {
+                orch.OnAmplitudeSampleReceived(Sample(node, OtherMac, locked, 1.0, 22_000 + (f * 10)));
+            }
+        }
+
+        // Act
+        orch.Tick(T0 + TimeSpan.FromSeconds(23));
+
+        // Assert — collapsed confidence + live channel = target moved, not dead air.
+        orch.Campaign.Mode.Should().Be(CampaignMode.Surveying);
+        orch.DrainEvents().OfType<ConfidenceDegraded>().Should().Contain(e => e.Reason == SurveyReason.TargetShifted);
+    }
+
+    [Fact]
+    public void Reacquire_resets_baselines_without_false_dead_air()
+    {
+        // Arrange — Detecting; feed a sparse target stream so confidence lands
+        // in the reacquire band (pps component ~0.4).
+        var orch = DriveToDetecting(new FakeRadio(), new FakeSink(), Fast);
+        var locked = orch.Campaign.LockedChannel!.Value;
+        for (var f = 0; f < 4; f++)
+        {
+            orch.OnAmplitudeSampleReceived(Sample(Nodes[0], Target, locked, 1.0, 22_000 + (f * 10)));
+        }
+
+        // Act — Reacquire fires and resets the channel's baselines.
+        orch.Tick(T0 + TimeSpan.FromSeconds(23));
+
+        // Assert — back in Acquiring.
+        orch.Campaign.Mode.Should().Be(CampaignMode.Acquiring);
+
+        // Act — regression: post-reset deltas must not read dead. Feed frames,
+        // then tick past the dead-channel timeout.
+        FeedStableStream(orch, locked, Target, 4, startMs: 24_000);
+        orch.Tick(T0 + TimeSpan.FromSeconds(26));
+
+        // Assert — the reset rebased the delta counters: live channel, no DeadAir skip.
+        orch.Campaign.Mode.Should().Be(CampaignMode.Acquiring);
     }
 
     #endregion

@@ -105,6 +105,57 @@ public class ConfidenceScoreTests
     }
 }
 
+public class RssiTests
+{
+    [Theory]
+    [InlineData((short)1)]      // positive dBm is not a real measurement
+    [InlineData((short)-200)]   // below physical floor
+    public void Rejects_out_of_range_values(short value)
+    {
+        // Act
+        var act = () => new Rssi(value);
+
+        // Assert
+        act.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    [Fact]
+    public void Accepts_typical_dbm_reading()
+    {
+        // Act & Assert
+        new Rssi(-55).Value.Should().Be(-55);
+    }
+}
+
+public class ActivityScoreTests
+{
+    [Fact]
+    public void Rejects_negative_and_nan()
+    {
+        // Act & Assert
+        FluentActions.Invoking(() => new ActivityScore(-1)).Should().Throw<ArgumentOutOfRangeException>();
+        FluentActions.Invoking(() => new ActivityScore(double.NaN)).Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    [Fact]
+    public void Orders_by_value_for_candidate_ranking()
+    {
+        // Act & Assert
+        new ActivityScore(9.0).Should().BeGreaterThan(new ActivityScore(3.0));
+    }
+}
+
+public class DeviationRatioTests
+{
+    [Fact]
+    public void Rejects_negative_and_nan()
+    {
+        // Act & Assert
+        FluentActions.Invoking(() => new DeviationRatio(-0.5)).Should().Throw<ArgumentOutOfRangeException>();
+        FluentActions.Invoking(() => new DeviationRatio(double.NaN)).Should().Throw<ArgumentOutOfRangeException>();
+    }
+}
+
 public class SensingDecisionTests
 {
     private static readonly MacAddress Target = MacAddress.Parse("08:E9:F6:63:9A:CC");

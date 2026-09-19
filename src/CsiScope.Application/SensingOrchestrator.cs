@@ -220,14 +220,14 @@ public sealed class SensingOrchestrator
 
     private ImmutableArray<ChannelCandidate> BuildCandidates(DateTimeOffset now)
     {
+        // Every known channel is a candidate — the policy's MinActivityScore
+        // gate decides which are worth ACQUIRING, while audits need the full
+        // list: off-lock channels receive no frames, so filtering on pps > 0
+        // would starve audit plans entirely.
         var list = new List<ChannelCandidate>(_activity.Count);
         foreach (var kv in _activity)
         {
-            double pps = kv.Value.Pps(now);
-            if (pps > 0)
-            {
-                list.Add(new ChannelCandidate(kv.Key, kv.Value.TopMac, new ActivityScore(pps)));
-            }
+            list.Add(new ChannelCandidate(kv.Key, kv.Value.TopMac, new ActivityScore(kv.Value.Pps(now))));
         }
 
         list.Sort((a, b) => b.ActivityScore.CompareTo(a.ActivityScore));
@@ -287,6 +287,12 @@ public sealed class SensingOrchestrator
                 kv.Value.Reset();
             }
         }
+
+        // Rebase the delta counters: they tracked pre-reset sums, so the next
+        // evaluation must measure only post-reset frames — otherwise the
+        // delta goes negative and a live channel reads as dead air.
+        _lastChannelFrames = 0;
+        _lastTargetFrames = 0;
     }
 
     // ---- Multi-step plan execution (survey sweeps and audits) ----
