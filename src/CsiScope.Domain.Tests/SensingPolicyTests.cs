@@ -47,7 +47,7 @@ public class SensingPolicyTests
     {
         // Arrange
         var ctx = Ctx(CampaignMode.Surveying,
-            candidates: new[] { new ChannelCandidate(Ch7, Target, 12.5) });
+            candidates: new[] { new ChannelCandidate(Ch7, Target, new ActivityScore(12.5)) });
 
         // Act
         var decision = SensingPolicy.Decide(ctx);
@@ -65,8 +65,8 @@ public class SensingPolicyTests
         var ctx = Ctx(CampaignMode.Surveying,
             candidates: new[]
             {
-                new ChannelCandidate(Ch6, Target, 4.0),
-                new ChannelCandidate(Ch11, Target, 9.0),
+                new ChannelCandidate(Ch6, Target, new ActivityScore(4.0)),
+                new ChannelCandidate(Ch11, Target, new ActivityScore(9.0)),
             });
 
         // Act
@@ -95,7 +95,7 @@ public class SensingPolicyTests
     {
         // Arrange
         var ctx = Ctx(CampaignMode.Surveying,
-            candidates: new[] { new ChannelCandidate(Ch6, Target, 0.2) });
+            candidates: new[] { new ChannelCandidate(Ch6, Target, new ActivityScore(0.2)) });
 
         // Act
         var decision = SensingPolicy.Decide(ctx);
@@ -208,7 +208,7 @@ public class SensingPolicyTests
             confidence: ConfidenceScore.Full,
             liveness: new ChannelLiveness(Ch6, 100, Now),
             lastAudit: Now - TimeSpan.FromSeconds(10),
-            candidates: new[] { new ChannelCandidate(Ch7, Target, 5.0) });
+            candidates: new[] { new ChannelCandidate(Ch7, Target, new ActivityScore(5.0)) });
 
         // Act
         var decision = SensingPolicy.Decide(ctx);
@@ -227,9 +227,9 @@ public class SensingPolicyTests
             lastAudit: Now - TimeSpan.FromSeconds(70),
             candidates: new[]
             {
-                new ChannelCandidate(Ch6, Target, 9.0),  // locked — excluded
-                new ChannelCandidate(Ch7, Target, 5.0),
-                new ChannelCandidate(Ch11, Target, 3.0),
+                new ChannelCandidate(Ch6, Target, new ActivityScore(9.0)),  // locked — excluded
+                new ChannelCandidate(Ch7, Target, new ActivityScore(5.0)),
+                new ChannelCandidate(Ch11, Target, new ActivityScore(3.0)),
             });
 
         // Act
@@ -249,7 +249,7 @@ public class SensingPolicyTests
             confidence: ConfidenceScore.Full,
             liveness: new ChannelLiveness(Ch6, 100, Now),
             lastAudit: Now - TimeSpan.FromSeconds(45),
-            candidates: new[] { new ChannelCandidate(Ch7, Target, 5.0) });
+            candidates: new[] { new ChannelCandidate(Ch7, Target, new ActivityScore(5.0)) });
 
         // Act
         var decision = SensingPolicy.Decide(ctx);
@@ -267,7 +267,7 @@ public class SensingPolicyTests
             confidence: new ConfidenceScore(0.8, 0.8, 0.9, 0.9),
             liveness: new ChannelLiveness(Ch6, 100, Now),
             lastAudit: Now - TimeSpan.FromSeconds(45),
-            candidates: new[] { new ChannelCandidate(Ch7, Target, 5.0) });
+            candidates: new[] { new ChannelCandidate(Ch7, Target, new ActivityScore(5.0)) });
 
         // Act
         var decision = SensingPolicy.Decide(ctx);
@@ -330,7 +330,7 @@ public class SensingPolicyTests
             confidence: ConfidenceScore.Full,
             liveness: new ChannelLiveness(Ch6, 100, Now),
             lastAudit: Now - TimeSpan.FromSeconds(120),
-            candidates: new[] { new ChannelCandidate(Ch6, Target, 9.0) });
+            candidates: new[] { new ChannelCandidate(Ch6, Target, new ActivityScore(9.0)) });
 
         // Act
         var decision = SensingPolicy.Decide(ctx);

@@ -14,13 +14,13 @@ public class LinkBaselineTests
         new WifiChannel(6));
 
     private static AmplitudeSample Sample(double amplitude, int offsetMs)
-        => new(Link, T0 + TimeSpan.FromMilliseconds(offsetMs), amplitude, -55);
+        => new(Link, T0 + TimeSpan.FromMilliseconds(offsetMs), amplitude, new Rssi(-55));
 
     private static LinkBaseline ConvergedBaseline()
     {
         var baseline = new LinkBaseline(Link);
         // Low-variance stream: alternates 1.00/1.02 -> variance ~1e-4.
-        for (var i = 0; i < LinkBaseline.DefaultWindowSize; i++)
+        for (var i = 0; i < BaselineTunables.DefaultWindowSize; i++)
         {
             baseline.Observe(Sample(i % 2 == 0 ? 1.00 : 1.02, i * 10));
         }
@@ -69,7 +69,7 @@ public class LinkBaselineTests
         var baseline = new LinkBaseline(Link);
 
         // Act
-        for (var i = 0; i < LinkBaseline.DefaultWindowSize - 1; i++)
+        for (var i = 0; i < BaselineTunables.DefaultWindowSize - 1; i++)
         {
             baseline.Observe(Sample(1.0, i * 10));
         }
@@ -113,7 +113,7 @@ public class LinkBaselineTests
         // Assert — deviation exceeded the floor; ratio magnitude is tunable.
         anomaly.Should().NotBeNull();
         anomaly!.Link.Should().Be(Link);
-        anomaly.DeviationRatio.Should().BeGreaterThan(1.0);
+        anomaly.DeviationRatio.Value.Should().BeGreaterThan(1.0);
     }
 
     [Fact]
