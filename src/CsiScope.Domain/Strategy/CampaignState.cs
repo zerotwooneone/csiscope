@@ -79,7 +79,6 @@ public sealed class CampaignState
                 break;
 
             case SensingDecision.Hold:
-            case SensingDecision.BeginSurvey:
                 break;
         }
     }

@@ -19,7 +19,8 @@ public class SensingOrchestratorTests
         MacAddress.Parse("14:C1:9F:2E:53:D1"),
         MacAddress.Parse("14:C1:9F:2E:53:D2"));
 
-    private static readonly MacAddress OtherMac = MacAddress.Parse("AA:BB:CC:DD:EE:FF");
+    // Globally-administered unicast — survives the ingestion gatekeeper.
+    private static readonly MacAddress OtherMac = MacAddress.Parse("AC:DE:48:00:11:22");
 
     // Tight timing so tests aren't pinned to production defaults.
     private static readonly SensingThresholds Fast = new()
@@ -93,6 +94,65 @@ public class SensingOrchestratorTests
         anomaly.Should().NotBeNull();
         anomaly!.Link.Source.Should().Be(Target);
         sink.Anomalies.Should().ContainSingle().Which.Should().Be(anomaly);
+    }
+
+    #endregion
+
+    #region Ingestion Gatekeeper & Resync
+
+    [Fact]
+    public void Multicast_and_locally_administered_frames_are_dropped()
+    {
+        // Arrange — a randomized probe-request MAC and a multicast MAC.
+        var (orch, _, _) = Create();
+        var randomized = MacAddress.Parse("02:11:22:33:44:55");
+        var multicast = MacAddress.Parse("01:00:5E:00:00:01");
+
+        // Act
+        var a = orch.OnAmplitudeSampleReceived(Sample(Nodes[0], randomized, Ch6, 1.0, 0));
+        var b = orch.OnAmplitudeSampleReceived(Sample(Nodes[0], multicast, Ch6, 1.0, 10));
+
+        // Assert — dropped at the door: no baselines, no anomalies.
+        a.Should().BeNull();
+        b.Should().BeNull();
+        orch.TrackedBaselineCount.Should().Be(0);
+    }
+
+    [Fact]
+    public void Dormant_baselines_are_pruned()
+    {
+        // Arrange — baselines fed once, then silent for over 10 minutes.
+        var (orch, _, _) = Create();
+        FeedStableStream(orch, Ch6, Target, 5);
+        orch.TrackedBaselineCount.Should().BeGreaterThan(0);
+
+        // Act
+        orch.Tick(T0 + TimeSpan.FromMinutes(11));
+
+        // Assert
+        orch.TrackedBaselineCount.Should().Be(0);
+    }
+
+    [Fact]
+    public void Sustained_wrong_channel_frames_trigger_command_reissue()
+    {
+        // Arrange — locked on ch6; the radio was last told (ch6, filter).
+        var radio = new FakeRadio();
+        var orch = DriveToAcquiring(radio, new FakeSink(), Fast);
+        orch.Campaign.LockedChannel.Should().Be(Ch6);
+        int callsBefore = radio.Calls.Count;
+        var ch1 = new WifiChannel(1);
+
+        // Act — 8 consecutive frames stamped ch1: the hop was dropped.
+        for (var i = 0; i < 8; i++)
+        {
+            orch.OnAmplitudeSampleReceived(Sample(Nodes[0], Target, ch1, 1.0, 30_000 + (i * 10)));
+        }
+
+        // Assert — the lock command was reissued for the believed channel.
+        radio.Calls.Count.Should().BeGreaterThan(callsBefore);
+        radio.Calls[^1].Channel.Should().Be(Ch6);
+        radio.Calls[^1].Filter.Should().NotBeEmpty();
     }
 
     #endregion

@@ -5,9 +5,6 @@ namespace CsiScope.Domain.Events;
 /// <summary>A channel lock was taken for acquisition/detection.</summary>
 public sealed record ChannelLockAcquired(WifiChannel Channel, MacAddress PrimaryTarget, DateTimeOffset At);
 
-/// <summary>A link baseline filled its window and locked its floor.</summary>
-public sealed record BaselineConverged(LinkIdentity Link, DateTimeOffset At);
-
 /// <summary>
 /// Per-link tripwire: squared amplitude deviation exceeded multiplier × floor.
 /// Deliberately single-link — multi-link shadowing correlation is a later

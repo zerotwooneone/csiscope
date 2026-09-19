@@ -15,9 +15,6 @@ public abstract record SensingDecision
     /// <summary>No change — continue current behavior.</summary>
     public sealed record Hold : SensingDecision;
 
-    /// <summary>Begin (or continue) a survey sweep over the given plan.</summary>
-    public sealed record BeginSurvey(ScanPlan Plan) : SensingDecision;
-
     /// <summary>
     /// Lock a channel and acquire baselines for the MAC filter. The filter is
     /// an <see cref="ImmutableArray{T}"/> with sequence equality — identical

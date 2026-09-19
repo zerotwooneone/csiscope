@@ -24,6 +24,13 @@ public sealed class SensingOrchestrator
 {
     private const int MaxFilterMacs = 8; // firmware mac_filter capacity
 
+    // Consecutive wrong-channel frames before the last hop is declared lost
+    // and reissued — absorbs in-flight stragglers from the previous channel.
+    private const int ChannelMismatchThreshold = 8;
+
+    private static readonly TimeSpan DormancyThreshold = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan PruneInterval = TimeSpan.FromMinutes(1);
+
     private readonly IRadioCommandPort _radio;
     private readonly IAnomalySink _anomalySink;
     private readonly SensingThresholds _thresholds;
@@ -32,7 +39,14 @@ public sealed class SensingOrchestrator
 
     private readonly Dictionary<LinkIdentity, LinkBaseline> _baselines = new();
     private readonly Dictionary<WifiChannel, ChannelActivity> _activity = new();
-    private readonly Dictionary<MacAddress, int> _macTotals = new();
+    private readonly Dictionary<MacAddress, (int Count, DateTimeOffset LastSeenAt)> _macTotals = new();
+
+    // Channel-confirmation: what the radio was last told to do. Sustained
+    // contradiction in incoming telemetry means the command was dropped.
+    private WifiChannel? _believedChannel;
+    private ImmutableArray<MacAddress> _believedFilter = [];
+    private int _channelMismatches;
+    private DateTimeOffset _lastPruneAt = DateTimeOffset.MinValue;
 
     // Multi-step plan execution (survey sweep or environment audit).
     private ScanPlan? _activePlan;
@@ -62,6 +76,9 @@ public sealed class SensingOrchestrator
     /// <summary>The campaign aggregate — mode, lock, and transition evidence.</summary>
     public CampaignState Campaign { get; } = new();
 
+    /// <summary>Live baseline count — diagnostics and pruning verification.</summary>
+    public int TrackedBaselineCount => _baselines.Count;
+
     /// <summary>
     /// Telemetry hot path — strictly synchronous, zero-allocation on repeat
     /// samples (dictionary hit + in-place Welford update). Routes the sample
@@ -70,6 +87,30 @@ public sealed class SensingOrchestrator
     /// </summary>
     public AnomalyDetected? OnAmplitudeSampleReceived(in AmplitudeSample sample)
     {
+        // Front-door gatekeeper: multicast and locally-administered
+        // (randomized probe-request) MACs never reach baselines or the
+        // environment map — they churn constantly and would leak memory.
+        if (sample.Link.Source.IsMulticast || sample.Link.Source.IsLocallyAdministered)
+        {
+            return null;
+        }
+
+        // Channel-confirmation: sustained contradiction means the last hop
+        // command was dropped — reissue it. A dead radio produces no frames
+        // at all, which the dead-air policy path already handles.
+        if (_believedChannel is { } expected)
+        {
+            if (sample.Link.Channel == expected)
+            {
+                _channelMismatches = 0;
+            }
+            else if (++_channelMismatches >= ChannelMismatchThreshold)
+            {
+                _channelMismatches = 0;
+                _ = _radio.BroadcastSetRfAsync(expected, _believedFilter);
+            }
+        }
+
         RecordActivity(sample.Link.Channel, sample.Link.Source, sample.Timestamp);
 
         if (!_baselines.TryGetValue(sample.Link, out var baseline))
@@ -111,6 +152,51 @@ public sealed class SensingOrchestrator
         {
             BeginPlan(BuildSurveyPlan(), now, auditReturnTo: null);
         }
+
+        // Dormancy pruning, throttled — dictionaries can't be modified during
+        // enumeration, so stale keys are collected first (cold-path alloc).
+        if (now - _lastPruneAt > PruneInterval)
+        {
+            _lastPruneAt = now;
+            PruneDormant(now);
+        }
+    }
+
+    private void PruneDormant(DateTimeOffset now)
+    {
+        List<LinkIdentity>? staleLinks = null;
+        foreach (var kv in _baselines)
+        {
+            if (now - kv.Value.LastFrameAt > DormancyThreshold)
+            {
+                (staleLinks ??= new List<LinkIdentity>()).Add(kv.Key);
+            }
+        }
+
+        if (staleLinks is not null)
+        {
+            foreach (var key in staleLinks)
+            {
+                _baselines.Remove(key);
+            }
+        }
+
+        List<MacAddress>? staleMacs = null;
+        foreach (var kv in _macTotals)
+        {
+            if (now - kv.Value.LastSeenAt > DormancyThreshold)
+            {
+                (staleMacs ??= new List<MacAddress>()).Add(kv.Key);
+            }
+        }
+
+        if (staleMacs is not null)
+        {
+            foreach (var key in staleMacs)
+            {
+                _macTotals.Remove(key);
+            }
+        }
     }
 
     /// <summary>Domain events recorded since the last drain (lock acquired, confidence degraded).</summary>
@@ -127,7 +213,7 @@ public sealed class SensingOrchestrator
         }
 
         activity.Record(source, at);
-        _macTotals[source] = _macTotals.TryGetValue(source, out var n) ? n + 1 : 1;
+        _macTotals[source] = _macTotals.TryGetValue(source, out var e) ? (e.Count + 1, at) : (1, at);
     }
 
     // ---- Context construction ----
@@ -237,7 +323,7 @@ public sealed class SensingOrchestrator
     private ImmutableArray<MacAddress> TopMacs(int take)
     {
         return _macTotals
-            .OrderByDescending(kv => kv.Value)
+            .OrderByDescending(kv => kv.Value.Count)
             .Take(take)
             .Select(kv => kv.Key)
             .ToImmutableArray();
@@ -253,10 +339,6 @@ public sealed class SensingOrchestrator
                 // Fresh baselines for the new lock — pre-lock frames are stale.
                 ResetBaselinesOnChannel(b.Channel);
                 HopTo(b.Channel, now, b.MacFilter);
-                break;
-
-            case SensingDecision.BeginSurvey s:
-                BeginPlan(s.Plan, now, auditReturnTo: null);
                 break;
 
             case SensingDecision.AuditChannels a:
@@ -337,6 +419,9 @@ public sealed class SensingOrchestrator
     private void HopTo(WifiChannel channel, DateTimeOffset now, ImmutableArray<MacAddress> macFilter)
     {
         _dwellStartedAt = now;
+        _believedChannel = channel;
+        _believedFilter = macFilter;
+        _channelMismatches = 0;
         if (_activity.TryGetValue(channel, out var activity))
         {
             activity.ResetWindow(now);
