@@ -130,7 +130,7 @@ public sealed class SensingHostWorker : BackgroundService
 
                 // Egress for this port lives exactly as long as the connection.
                 var s = stream;
-                nodeAdapter = new NodeSerialAdapter((bytes, token) => s.WriteAsync(bytes, token));
+                nodeAdapter = new NodeSerialAdapter((bytes, token) => s.WriteAsync(bytes, token), _time);
                 _radio.RegisterNode(portName, nodeAdapter);
 
                 await PumpStreamAsync(stream, portName, ct);

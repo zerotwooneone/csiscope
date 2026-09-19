@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using CsiScope.Domain.Model;
 using FluentAssertions;
@@ -5,17 +6,18 @@ using Xunit;
 
 namespace CsiScope.Infrastructure.Tests;
 
+[Trait("Category", "Component")] // real fan-out concurrency + timeouts — not pure unit tests
 public class BroadcastRadioAdapterTests
 {
     private static readonly WifiChannel Ch6 = new(6);
     private static readonly MacAddress Target = MacAddress.Parse("08:E9:F6:63:9A:CC");
 
     /// <summary>A node adapter that records writes; acks are driven explicitly by the test.</summary>
-    private static NodeSerialAdapter RecordingNode(List<byte[]> sent)
+    private static NodeSerialAdapter RecordingNode(ConcurrentQueue<byte[]> sent)
         => new(
             (bytes, _) =>
             {
-                sent.Add(bytes.ToArray());
+                sent.Enqueue(bytes.ToArray());
                 return ValueTask.CompletedTask;
             },
             ackTimeout: TimeSpan.FromMilliseconds(50));
@@ -36,8 +38,8 @@ public class BroadcastRadioAdapterTests
     {
         // Arrange
         var broadcast = new BroadcastRadioAdapter();
-        var sentA = new List<byte[]>();
-        var sentB = new List<byte[]>();
+        var sentA = new ConcurrentQueue<byte[]>();
+        var sentB = new ConcurrentQueue<byte[]>();
         await using var a = RecordingNode(sentA);
         await using var b = RecordingNode(sentB);
         broadcast.RegisterNode("COM9", a);
@@ -58,7 +60,7 @@ public class BroadcastRadioAdapterTests
     {
         // Arrange — two will ack, one never does (times out at 50ms).
         var broadcast = new BroadcastRadioAdapter();
-        var sent = new List<byte[]>();
+        var sent = new ConcurrentQueue<byte[]>();
         await using var a = RecordingNode(sent);
         await using var b = RecordingNode(sent);
         await using var dead = RecordingNode(sent);
@@ -81,7 +83,7 @@ public class BroadcastRadioAdapterTests
     {
         // Arrange — only one of three acks.
         var broadcast = new BroadcastRadioAdapter();
-        var sent = new List<byte[]>();
+        var sent = new ConcurrentQueue<byte[]>();
         await using var a = RecordingNode(sent);
         await using var dead1 = RecordingNode(sent);
         await using var dead2 = RecordingNode(sent);
@@ -103,8 +105,8 @@ public class BroadcastRadioAdapterTests
     {
         // Arrange — two nodes; only COM10's pending command should complete.
         var broadcast = new BroadcastRadioAdapter();
-        var sentA = new List<byte[]>();
-        var sentB = new List<byte[]>();
+        var sentA = new ConcurrentQueue<byte[]>();
+        var sentB = new ConcurrentQueue<byte[]>();
         await using var a = RecordingNode(sentA);
         await using var b = RecordingNode(sentB);
         broadcast.RegisterNode("COM9", a);

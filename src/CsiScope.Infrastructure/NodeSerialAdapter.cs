@@ -27,6 +27,7 @@ public sealed class NodeSerialAdapter : IAsyncDisposable
     private const int ScanDwellMs = 5000; // firmware max; host re-commands sooner
 
     private readonly Func<ReadOnlyMemory<byte>, CancellationToken, ValueTask> _writeAsync;
+    private readonly TimeProvider _time;
     private readonly Channel<OutboundCommand> _queue;
     private readonly ConcurrentDictionary<long, TaskCompletionSource<bool>> _pendingAcks = new();
     private readonly CancellationTokenSource _stop = new();
@@ -36,12 +37,15 @@ public sealed class NodeSerialAdapter : IAsyncDisposable
     private long _seq;
 
     /// <param name="writeAsync">Writes one framed NDJSON line to this node's stream.</param>
+    /// <param name="time">Clock for ACK timeouts — injectable for deterministic tests.</param>
     public NodeSerialAdapter(
         Func<ReadOnlyMemory<byte>, CancellationToken, ValueTask> writeAsync,
+        TimeProvider? time = null,
         TimeSpan? ackTimeout = null,
         int maxAttempts = 2)
     {
         _writeAsync = writeAsync;
+        _time = time ?? TimeProvider.System;
         _ackTimeout = ackTimeout ?? TimeSpan.FromMilliseconds(1000);
         _maxAttempts = Math.Max(1, maxAttempts);
         _queue = Channel.CreateBounded<OutboundCommand>(new BoundedChannelOptions(QueueCapacity)
@@ -125,7 +129,7 @@ public sealed class NodeSerialAdapter : IAsyncDisposable
             {
                 await _writeAsync(payload, _stop.Token);
                 // Completes true on ACK, false on NACK — both terminal.
-                result = await wait.Task.WaitAsync(_ackTimeout, _stop.Token);
+                result = await wait.Task.WaitAsync(_ackTimeout, _time, _stop.Token);
             }
             catch (TimeoutException)
             {

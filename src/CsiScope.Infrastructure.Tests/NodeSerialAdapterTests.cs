@@ -1,26 +1,29 @@
+using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using System.Text;
 using CsiScope.Domain.Model;
 using FluentAssertions;
+using Microsoft.Extensions.Time.Testing;
 using Xunit;
 
 namespace CsiScope.Infrastructure.Tests;
 
+[Trait("Category", "Component")] // real send loop + timing coordination — not pure unit tests
 public class NodeSerialAdapterTests
 {
     private static readonly WifiChannel Ch6 = new(6);
     private static readonly MacAddress Target = MacAddress.Parse("08:E9:F6:63:9A:CC");
 
-    private static (NodeSerialAdapter Adapter, List<byte[]> Sent) Create(TimeSpan? ackTimeout = null)
+    private static (NodeSerialAdapter Adapter, ConcurrentQueue<byte[]> Sent) Create(TimeSpan? ackTimeout = null)
     {
-        var sent = new List<byte[]>();
+        var sent = new ConcurrentQueue<byte[]>();
         var adapter = new NodeSerialAdapter(
             (bytes, _) =>
             {
-                sent.Add(bytes.ToArray());
+                sent.Enqueue(bytes.ToArray());
                 return ValueTask.CompletedTask;
             },
-            ackTimeout ?? TimeSpan.FromMilliseconds(100));
+            ackTimeout: ackTimeout ?? TimeSpan.FromMilliseconds(100));
         return (adapter, sent);
     }
 
@@ -40,14 +43,14 @@ public class NodeSerialAdapterTests
         await WaitFor(() => sent.Count == 1);
 
         // Assert — passive schema: ch, bw, mode, seq, mac_filter, newline-framed.
-        var json = SentJson(sent[0]);
+        var json = SentJson(sent.First());
         json.Should().Contain("\"cmd\":\"set_rf\"");
         json.Should().Contain("\"ch\":6");
         json.Should().Contain("\"bw\":20");
         json.Should().Contain("\"mode\":\"passive\"");
         json.Should().Contain("\"mac_filter\":[\"08E9F6639ACC\"]");
         json.Should().Contain("\"seq\":");
-        sent[0][^1].Should().Be((byte)'\n');
+        sent.First()[^1].Should().Be((byte)'\n');
 
         adapter.NotifyAck(1, true);
         (await pending).Should().BeTrue();
@@ -65,7 +68,7 @@ public class NodeSerialAdapterTests
         await WaitFor(() => sent.Count == 1);
 
         // Assert — dwell_ms scan variant; no mac_filter key at all.
-        var json = SentJson(sent[0]);
+        var json = SentJson(sent.First());
         json.Should().Contain("\"dwell_ms\"");
         json.Should().NotContain("mac_filter");
         json.Should().NotContain("\"mode\":\"passive\"");
@@ -211,6 +214,57 @@ public class NodeSerialAdapterTests
         // Assert — the loop survived the transport failure.
         first.Should().BeFalse();
         (await second).Should().BeTrue();
+    }
+
+    #endregion
+
+    #region Virtual Time — deterministic timeout control via FakeTimeProvider
+
+    [Fact]
+    public async Task Timeout_retries_then_fails_on_virtual_clock()
+    {
+        // Arrange — virtual clock: timeouts fire only when the test advances it.
+        var time = new FakeTimeProvider();
+        var sent = new ConcurrentQueue<byte[]>();
+        var adapter = new NodeSerialAdapter(
+            (bytes, _) => { sent.Enqueue(bytes.ToArray()); return ValueTask.CompletedTask; },
+            time: time,
+            ackTimeout: TimeSpan.FromSeconds(1));
+        await using var _ = adapter;
+
+        // Act — first write lands; no ack; advance past the timeout -> retry.
+        var pending = adapter.SendSetRfAsync(Ch6, ImmutableArray.Create(Target));
+        await WaitFor(() => sent.Count == 1);
+        time.Advance(TimeSpan.FromSeconds(1));
+        await WaitFor(() => sent.Count == 2);
+        time.Advance(TimeSpan.FromSeconds(1));
+
+        // Assert — two attempts, then false. No real time elapsed.
+        (await pending).Should().BeFalse();
+        sent.Count.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task Ack_before_virtual_deadline_completes_true()
+    {
+        // Arrange
+        var time = new FakeTimeProvider();
+        var sent = new ConcurrentQueue<byte[]>();
+        var adapter = new NodeSerialAdapter(
+            (bytes, _) => { sent.Enqueue(bytes.ToArray()); return ValueTask.CompletedTask; },
+            time: time,
+            ackTimeout: TimeSpan.FromSeconds(1));
+        await using var _ = adapter;
+
+        // Act — ack arrives before the clock advances.
+        var pending = adapter.SendSetRfAsync(Ch6, ImmutableArray.Create(Target));
+        await WaitFor(() => sent.Count == 1);
+        adapter.NotifyAck(1, success: true);
+
+        // Assert — completed true; advancing the clock changes nothing.
+        (await pending).Should().BeTrue();
+        time.Advance(TimeSpan.FromSeconds(10));
+        sent.Count.Should().Be(1); // no retry fired
     }
 
     #endregion
