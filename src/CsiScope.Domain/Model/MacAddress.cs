@@ -63,6 +63,45 @@ public readonly record struct MacAddress : IEquatable<MacAddress>
         return true;
     }
 
+    /// <summary>UTF-8 byte-span overload — zero-allocation wire parsing.</summary>
+    public static bool TryParse(ReadOnlySpan<byte> utf8, out MacAddress mac)
+    {
+        mac = default;
+        ulong value = 0;
+        var nibbles = 0;
+
+        foreach (byte c in utf8)
+        {
+            if (c is (byte)':' or (byte)'-' or (byte)'.')
+            {
+                continue;
+            }
+
+            int digit = c switch
+            {
+                >= (byte)'0' and <= (byte)'9' => c - (byte)'0',
+                >= (byte)'a' and <= (byte)'f' => c - (byte)'a' + 10,
+                >= (byte)'A' and <= (byte)'F' => c - (byte)'A' + 10,
+                _ => -1,
+            };
+            if (digit < 0 || nibbles >= 12)
+            {
+                return false;
+            }
+
+            value = (value << 4) | (uint)digit;
+            nibbles++;
+        }
+
+        if (nibbles != 12)
+        {
+            return false;
+        }
+
+        mac = new MacAddress(value);
+        return true;
+    }
+
     /// <summary>IG bit of the first octet — multicast/broadcast frames.</summary>
     public bool IsMulticast => (_value & 0x0100_0000_0000UL) != 0;
 

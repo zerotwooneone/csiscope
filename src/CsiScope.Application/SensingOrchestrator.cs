@@ -35,7 +35,7 @@ public sealed class SensingOrchestrator
     private readonly IAnomalySink _anomalySink;
     private readonly SensingThresholds _thresholds;
     private readonly BaselineTunables _tunables;
-    private readonly ImmutableArray<MacAddress> _expectedNodes;
+    private readonly HashSet<MacAddress> _expectedNodes;
 
     private readonly Dictionary<LinkIdentity, LinkBaseline> _baselines = new();
     private readonly Dictionary<WifiChannel, ChannelActivity> _activity = new();
@@ -68,7 +68,7 @@ public sealed class SensingOrchestrator
     {
         _radio = radio;
         _anomalySink = anomalySink;
-        _expectedNodes = expectedNodes;
+        _expectedNodes = new HashSet<MacAddress>(expectedNodes);
         _thresholds = thresholds ?? SensingThresholds.Default;
         _tunables = tunables ?? BaselineTunables.Default;
     }
@@ -78,6 +78,12 @@ public sealed class SensingOrchestrator
 
     /// <summary>Live baseline count — diagnostics and pruning verification.</summary>
     public int TrackedBaselineCount => _baselines.Count;
+
+    /// <summary>
+    /// Register a node that self-announced via a config frame. Single-writer:
+    /// call from the same thread as ingestion/tick.
+    /// </summary>
+    public void RegisterExpectedNode(MacAddress node) => _expectedNodes.Add(node);
 
     /// <summary>
     /// Telemetry hot path — strictly synchronous, zero-allocation on repeat
@@ -278,7 +284,7 @@ public sealed class SensingOrchestrator
 
     private bool AllNodesConverged(WifiChannel? locked)
     {
-        if (locked is not { } channel || _expectedNodes.IsEmpty)
+        if (locked is not { } channel || _expectedNodes.Count == 0)
         {
             return false;
         }

@@ -36,10 +36,10 @@ public class SensingOrchestratorTests
     {
         public List<(WifiChannel Channel, ImmutableArray<MacAddress> Filter)> Calls { get; } = new();
 
-        public Task BroadcastSetRfAsync(WifiChannel channel, ImmutableArray<MacAddress> macFilter, CancellationToken ct = default)
+        public Task<bool> BroadcastSetRfAsync(WifiChannel channel, ImmutableArray<MacAddress> macFilter, CancellationToken ct = default)
         {
             Calls.Add((channel, macFilter));
-            return Task.CompletedTask;
+            return Task.FromResult(true);
         }
     }
 

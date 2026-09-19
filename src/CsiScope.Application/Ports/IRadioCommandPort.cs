@@ -13,7 +13,8 @@ public interface IRadioCommandPort
     /// <summary>
     /// Set the passive listening channel and MAC filter on all nodes.
     /// An empty <paramref name="macFilter"/> means "accept all transmitters"
-    /// (used while surveying/auditing).
+    /// (used while surveying/auditing). Returns true when the firmware
+    /// acknowledged the command; false on timeout/transport failure.
     /// </summary>
-    Task BroadcastSetRfAsync(WifiChannel channel, ImmutableArray<MacAddress> macFilter, CancellationToken ct = default);
+    Task<bool> BroadcastSetRfAsync(WifiChannel channel, ImmutableArray<MacAddress> macFilter, CancellationToken ct = default);
 }
