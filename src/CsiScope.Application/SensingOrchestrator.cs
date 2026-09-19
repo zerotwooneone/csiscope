@@ -163,8 +163,11 @@ public sealed class SensingOrchestrator
         double seconds = _lastEvalAt == DateTimeOffset.MinValue
             ? 1.0
             : Math.Max((now - _lastEvalAt).TotalSeconds, 0.001);
-        double observedPps = (targetFrames - _lastTargetFrames) / seconds;
-        long channelDelta = channelFrames - _lastChannelFrames;
+        // Deltas clamp at zero: baseline resets (acquisition/reacquire) zero
+        // TotalFrames, which would otherwise produce negative deltas and make
+        // ChannelLiveness falsely report dead air on a live channel.
+        double observedPps = Math.Max(0, targetFrames - _lastTargetFrames) / seconds;
+        long channelDelta = Math.Max(0, channelFrames - _lastChannelFrames);
         _lastTargetFrames = targetFrames;
         _lastChannelFrames = channelFrames;
         _lastEvalAt = now;
