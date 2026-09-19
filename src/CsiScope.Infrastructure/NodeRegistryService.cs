@@ -1,6 +1,5 @@
 using System.IO.Ports;
 using System.Text.Json;
-using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -32,6 +31,7 @@ public sealed class NodeRegistryService
     };
 
     private readonly int _baudRate;
+    private readonly string _configDirectory;
     private readonly string _geometryPath;
     private readonly object _gate = new();
     private readonly List<string?> _geometry;   // position → MAC (persisted)
@@ -40,12 +40,16 @@ public sealed class NodeRegistryService
 
     public NodeRegistryService(
         IOptions<SensingOptions> options,
-        IHostEnvironment environment,
         ILogger<NodeRegistryService>? logger = null)
     {
         _baudRate = options.Value.SerialBaudRate;
         _logger = logger;
-        _geometryPath = Path.Combine(environment.ContentRootPath, "array_geometry.json");
+
+        // Geometry is user data — it lives in appdata, not a checked-in project file.
+        _configDirectory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData, Environment.SpecialFolderOption.Create),
+            "CsiScope");
+        _geometryPath = Path.Combine(_configDirectory, "array-geometry.json");
         _geometry = LoadGeometry();
     }
 
@@ -215,6 +219,7 @@ public sealed class NodeRegistryService
     {
         try
         {
+            Directory.CreateDirectory(_configDirectory);
             var payload = new { Positions = _geometry };
             File.WriteAllText(_geometryPath, JsonSerializer.Serialize(payload, SerializerOptions));
         }
