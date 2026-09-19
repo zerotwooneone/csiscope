@@ -54,6 +54,7 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
     private static readonly TimeSpan TripwireCooldown = TimeSpan.FromSeconds(1);
     private const int MaxRecentTripwires = 50;
     private readonly ConcurrentDictionary<(string NodeMac, ulong SrcMac, int Channel), VarianceHistoryBuffer> _varianceHistory = new();
+    private readonly ConcurrentDictionary<(string NodeMac, ulong SrcMac, int Channel), VarianceHistoryBuffer> _floorHistory = new();
     private readonly ConcurrentDictionary<(string NodeMac, ulong SrcMac, int Channel), DateTimeOffset> _lastTripwireAt = new();
     private readonly ConcurrentQueue<TripwireEvent> _recentTripwires = new();
     private bool _subcarrierWarned;
@@ -283,6 +284,26 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
     }
 
     /// <summary>
+    /// Downsampled (~5 Hz) p95 variance-floor time series per link, oldest to
+    /// newest. A decaying-then-flat trend means the baseline is stabilizing;
+    /// a rising or oscillating trend means multipath drift or interference.
+    /// </summary>
+    public IReadOnlyDictionary<(string NodeMac, ulong SrcMac, int Channel), IReadOnlyList<double>> GetFloorSeries()
+    {
+        var result = new Dictionary<(string NodeMac, ulong SrcMac, int Channel), IReadOnlyList<double>>();
+        foreach (var kv in _floorHistory)
+        {
+            var snapshot = kv.Value.Snapshot();
+            if (snapshot.Length > 0)
+            {
+                result[kv.Key] = snapshot;
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
     /// Mean squared deviation of a single frame from the baseline's running
     /// mean, in the same scaled units as the Welford variance. Single pass,
     /// no allocation.
@@ -393,6 +414,11 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
                         double liveVariance = ComputeFrameDeviation(payload.Csi, csiBaseline);
                         _varianceHistory.GetOrAdd(key, _ => new VarianceHistoryBuffer(VarianceHistoryCapacity))
                             .Add(liveVariance, payload.ReceivedAt);
+
+                        // p95 floor trend: shows whether the noise floor is
+                        // decaying toward stability or drifting/oscillating.
+                        _floorHistory.GetOrAdd(key, _ => new VarianceHistoryBuffer(VarianceHistoryCapacity))
+                            .Add(csiBaseline.PercentileVariance, payload.ReceivedAt);
 
                         if (csiBaseline.IsConverged &&
                             liveVariance > csiBaseline.PercentileVariance * aoaOptions.TripwireVarianceMultiplier &&
@@ -804,6 +830,7 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
             {
                 _lastUpdateAt.TryRemove(key, out _);
                 _varianceHistory.TryRemove(key, out _);
+                _floorHistory.TryRemove(key, out _);
                 _lastTripwireAt.TryRemove(key, out _);
             }
         }

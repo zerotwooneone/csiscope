@@ -24,6 +24,13 @@ public sealed class RoomBaseline
     private double _varianceFloor;
     private double _convergenceThreshold;
     private bool _convergenceThresholdLocked;
+    private int _convergenceMisses;
+
+    // Consecutive above-threshold p95 evaluations before the floor re-locks.
+    // Long enough that transient motion spikes can't ratchet the baseline,
+    // short enough that genuine RF drift (or a floor latched during an
+    // unnaturally quiet transient) recovers instead of locking out forever.
+    private const int ConvergenceRelockFrames = 128;
 
     private readonly double _emaAlpha;
     private readonly double _sampleRateHz;
@@ -143,11 +150,40 @@ public sealed class RoomBaseline
                 _varianceFloor = p95;
                 _convergenceThreshold = _convergenceVarianceMultiplier * _varianceFloor;
                 _convergenceThresholdLocked = true;
+                _convergenceMisses = 0;
+            }
+            else if (p95 > _convergenceThreshold)
+            {
+                // Sustained elevation means the static-room floor genuinely
+                // drifted (or latched near zero during a quiet transient);
+                // re-lock so the link isn't locked out of convergence forever.
+                if (++_convergenceMisses >= ConvergenceRelockFrames)
+                {
+                    _varianceFloor = p95;
+                    _convergenceThreshold = _convergenceVarianceMultiplier * _varianceFloor;
+                    _convergenceMisses = 0;
+                }
+            }
+            else
+            {
+                _convergenceMisses = 0;
             }
 
             return p95 <= _convergenceThreshold;
         }
     }
+
+    /// <summary>
+    /// The p95 variance floor captured when the convergence threshold locked
+    /// (or last re-locked). Diagnostic surface for stall analysis.
+    /// </summary>
+    public double VarianceFloor => _varianceFloor;
+
+    /// <summary>
+    /// The currently locked convergence threshold
+    /// (<see cref="ConvergenceVarianceMultiplier"/> x <see cref="VarianceFloor"/>).
+    /// </summary>
+    public double ConvergenceThreshold => _convergenceThreshold;
 
     /// <summary>
     /// 95th-percentile slot variance, which is the same metric used by <see cref="IsConverged"/>.
@@ -424,6 +460,7 @@ public sealed class RoomBaseline
         _convergenceThresholdLocked = false;
         _varianceFloor = 0.0;
         _convergenceThreshold = 0.0;
+        _convergenceMisses = 0;
 
         _counts = new long[_slotCount];
         _welfordMean = new double[_slotCount];

@@ -239,17 +239,20 @@
                 <div class="modal-body">
                     @if (Store.LatestRecommendation is not null)
                     {
-                        <div class="alert alert-info">
-                            <strong>Recommendation:</strong> @Store.LatestRecommendation.Reason<br />
-                            <small>Score: @Store.LatestRecommendation.Score.ToString("F2")</small>
-                            @if (Store.LatestRecommendation.BestMacAmpVar is double recAmpVar)
-                            {
-                                <br />
-                                <small>
-                                    Amp var: @recAmpVar.ToString("F4") &rarr; score &times;@Store.LatestRecommendation.BestMacAmpFactor.ToString("F2")
-                                    (@((1.0 - Store.LatestRecommendation.BestMacAmpFactor).ToString("P0")) penalty)
-                                </small>
-                            }
+                        <div class="alert alert-info d-flex justify-content-between align-items-start gap-2">
+                            <div>
+                                <strong>Recommendation:</strong> @Store.LatestRecommendation.Reason<br />
+                                <small>Score: @Store.LatestRecommendation.Score.ToString("F2")</small>
+                                @if (Store.LatestRecommendation.BestMacAmpVar is double recAmpVar)
+                                {
+                                    <br />
+                                    <small>
+                                        Amp var: @recAmpVar.ToString("F4") &rarr; score &times;@Store.LatestRecommendation.BestMacAmpFactor.ToString("F2")
+                                        (@((1.0 - Store.LatestRecommendation.BestMacAmpFactor).ToString("P0")) penalty)
+                                    </small>
+                                }
+                            </div>
+                            <button class="btn btn-primary btn-sm text-nowrap" type="button" @onclick="PrimeDetectionFromSurvey" title="Load the recommended channel and target MACs into the Detection Coordinator">Apply &amp; Prime Detection</button>
                         </div>
                     }
                     else
@@ -463,6 +466,14 @@
             @if (Coordinator.IsRunning)
             {
                 <span class="badge bg-success me-1">Running</span>
+                @if (Coordinator.IsAcquiring)
+                {
+                    <span class="badge bg-warning text-dark me-1">Acquiring baselines</span>
+                }
+                @if (Coordinator.LastSkippedChannel is int skippedCh)
+                {
+                    <span class="badge bg-secondary me-1">skipped ch @skippedCh (dead air)</span>
+                }
                 @if (Coordinator.CurrentChannel is int curCh)
                 {
                     <span class="badge bg-info text-dark me-1">ch @curCh</span>
@@ -479,6 +490,7 @@
         </span>
     </div>
     <div class="card-body">
+        <p class="text-muted small mb-2">Hops all nodes through the channel list while streaming filtered CSI — use for tripwire sweeps. For a single-channel static lock (phase/AoA diagnostics), use Lock &amp; Stream in the survey modal.</p>
         <div class="row g-2 align-items-end mb-3">
             <div class="col-md-5">
                 <label class="form-label">Channels (comma-separated)</label>
@@ -499,6 +511,19 @@
                 }
             </div>
         </div>
+        @{ var nodeConvergence = GetNodeConvergence().ToList(); }
+        @if (nodeConvergence.Count > 0)
+        {
+            <div class="d-flex flex-wrap gap-2 mb-3">
+                @foreach (var node in nodeConvergence)
+                {
+                    <span class="badge @(node.Converged ? "bg-success" : "bg-warning text-dark")"
+                          title="Best link on this node: @node.Frames/@node.Window frames, p95 @node.P95.ToString("F4") vs threshold @node.Threshold.ToString("F4")">
+                        @node.NodeMac: @node.Frames/@node.Window @(node.Converged ? "Locked" : "Learning")
+                    </span>
+                }
+            </div>
+        }
         @{ var varianceSeries = GetActiveVarianceSeries(); }
         @if (varianceSeries is not null)
         {
@@ -521,40 +546,49 @@
 
 <div class="card mb-3">
     <div class="card-header d-flex justify-content-between align-items-center">
-        <span>Raw Subcarrier Phase (per packet)</span>
-        <span class="badge bg-secondary" title="Raw Atan2(Q,I) phase at the locked reference subcarrier, one point per packet. A flat line = stable phase (calibratable); uniform scatter across -pi..+pi = random per-packet offset (coherent AoA infeasible).">ref subcarrier @Dsp.ReferenceIndex</span>
+        <span>Baseline Convergence Tracker</span>
+        <span class="badge bg-secondary">per-node ingestion &amp; window fill</span>
     </div>
     <div class="card-body">
-        @{ var phaseSeries = Dsp.GetPhaseSeries(); }
-        @if (phaseSeries.Count == 0)
+        @{ var trackerRows = GetNodeTrackerRows().ToList(); }
+        @if (trackerRows.Count == 0)
         {
-            <p class="text-muted small mb-0">Collecting phase samples — the reference subcarrier locks after ~200 frames.</p>
+            <p class="text-muted small mb-0">No nodes connected.</p>
         }
         else
         {
-            <svg viewBox="0 0 720 220" width="100%" height="220" preserveAspectRatio="none" style="border:1px solid var(--bs-border-color); background:var(--bs-body-bg); color: var(--bs-body-color);">
-                @* Horizontal gridlines at +pi, +pi/2, 0, -pi/2, -pi *@
-                <line x1="34" y1="12"  x2="716" y2="12"  stroke="currentColor" stroke-width="0.5" stroke-dasharray="3 3" opacity="0.4" />
-                <line x1="34" y1="61"  x2="716" y2="61"  stroke="currentColor" stroke-width="0.5" stroke-dasharray="3 3" opacity="0.4" />
-                <line x1="34" y1="110" x2="716" y2="110" stroke="currentColor" stroke-width="0.8" opacity="0.6" />
-                <line x1="34" y1="159" x2="716" y2="159" stroke="currentColor" stroke-width="0.5" stroke-dasharray="3 3" opacity="0.4" />
-                <line x1="34" y1="208" x2="716" y2="208" stroke="currentColor" stroke-width="0.5" stroke-dasharray="3 3" opacity="0.4" />
-                <text x="4" y="16"  font-size="10" fill="currentColor">+π</text>
-                <text x="4" y="65"  font-size="10" fill="currentColor">+π/2</text>
-                <text x="4" y="114" font-size="10" fill="currentColor">0</text>
-                <text x="4" y="163" font-size="10" fill="currentColor">−π/2</text>
-                <text x="4" y="212" font-size="10" fill="currentColor">−π</text>
-                @for (int s = 0; s < phaseSeries.Count; s++)
-                {
-                    <polyline points="@PhasePoints(phaseSeries[s].Phases)" fill="none" stroke="@PhaseColor(s)" stroke-width="1.2" stroke-opacity="0.85" />
-                }
-            </svg>
-            <div class="d-flex flex-wrap gap-3 mt-2 small">
-                @for (int s = 0; s < phaseSeries.Count; s++)
-                {
-                    <span><span style="color:@PhaseColor(s)">&#9632;</span> [Ch: @phaseSeries[s].Channel] @phaseSeries[s].NodeMac &larr; @phaseSeries[s].SrcMac</span>
-                }
-            </div>
+            @foreach (var row in trackerRows)
+            {
+                <div class="mb-3">
+                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-1">
+                        <span class="font-monospace small">@row.NodeMac</span>
+                        <span>
+                            <span class="badge @(row.Pps > 0.5 ? "bg-info text-dark" : "bg-danger") me-1" title="Live CSI frame ingestion rate — 0 means the filter or channel is mismatched">@row.Pps.ToString("F1") pps</span>
+                            @if (row.HasBaseline)
+                            {
+                                <span class="badge @(row.Converged ? "bg-success" : "bg-warning text-dark")">@(row.Converged ? "Locked" : "Learning")</span>
+                            }
+                            else
+                            {
+                                <span class="badge bg-secondary">no data</span>
+                            }
+                        </span>
+                    </div>
+                    <div class="progress mt-1" style="height: 0.75rem;" title="Welford window fill: @row.Frames/@row.Window frames">
+                        <div class="progress-bar @(row.Converged ? "bg-success" : "bg-warning")" role="progressbar" style="width: @row.FillPct.ToString("F0")%"></div>
+                    </div>
+                    <div class="d-flex justify-content-between small text-muted mt-1">
+                        <span>frames @row.Frames/@row.Window — p95 @row.P95.ToString("F4") vs thr @row.Threshold.ToString("F4")</span>
+                        <span>@row.TrendLabel</span>
+                    </div>
+                    @if (row.FloorSeries is { Count: > 1 })
+                    {
+                        <svg viewBox="0 0 720 60" class="w-100" preserveAspectRatio="none" style="max-height: 3rem;">
+                            <polyline points="@FloorPoints(row.FloorSeries)" fill="none" stroke="#4363d8" stroke-width="1.2" stroke-opacity="0.85" />
+                        </svg>
+                    }
+                </div>
+            }
         }
     </div>
 </div>
@@ -700,6 +734,9 @@ else
     private string _detectChannels = "1, 6, 11";
     private int _detectDwellMs = 250;
     private bool _allBaselinesConverged;
+    private readonly Dictionary<string, double> _nodePps = new(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string, long> _prevFrameTotals = new(StringComparer.OrdinalIgnoreCase);
+    private DateTimeOffset _prevPpsAt = DateTimeOffset.UtcNow;
     private bool _accumulateSweep;
     private readonly ConcurrentDictionary<string, byte> _cooldownKeys = new();
     private readonly ConcurrentDictionary<string, NodeConfiguration> _localConfigurations = new();
@@ -728,11 +765,39 @@ else
 
         while (await _timer.WaitForNextTickAsync().ConfigureAwait(false))
         {
-            // Converged = every node has at least one locked baseline link.
-            // Requiring ALL links to converge lets a single dormant MAC stall
-            // the indicator forever.
-            var byNode = Dsp.Baselines.GroupBy(kv => kv.Key.NodeMac).ToList();
-            _allBaselinesConverged = byNode.Count > 0 && byNode.All(g => g.Any(kv => kv.Value.IsConverged));
+            // Converged = every connected node has at least one locked
+            // baseline link. Baseline keys are canonical (colonless) while
+            // GetConnectedMacs returns colon-delimited strings — normalize.
+            var connected = Store.GetConnectedMacs();
+            _allBaselinesConverged = connected.Count > 0 && connected.All(node =>
+            {
+                var canonical = CsiHub.Core.MacAddressFormatter.ToCanonicalCached(node);
+                return Dsp.Baselines.Any(kv =>
+                    string.Equals(kv.Key.NodeMac, canonical, StringComparison.OrdinalIgnoreCase)
+                    && kv.Value.IsConverged);
+            });
+
+            // Per-node ingestion rate: delta of summed baseline frame counts
+            // over the poll interval. 0 pps = filter/channel mismatch.
+            var now = DateTimeOffset.UtcNow;
+            var elapsed = (now - _prevPpsAt).TotalSeconds;
+            if (elapsed > 0.0)
+            {
+                var totals = Dsp.Baselines
+                    .GroupBy(kv => kv.Key.NodeMac)
+                    .ToDictionary(g => g.Key, g => g.Sum(kv => kv.Value.TotalFrames), StringComparer.OrdinalIgnoreCase);
+                foreach (var node in connected)
+                {
+                    var canonical = CsiHub.Core.MacAddressFormatter.ToCanonicalCached(node);
+                    totals.TryGetValue(canonical, out var cur);
+                    _prevFrameTotals.TryGetValue(node, out var prev);
+                    _nodePps[node] = Math.Max(0.0, (cur - prev) / elapsed);
+                }
+
+                _prevFrameTotals = totals;
+                _prevPpsAt = now;
+            }
+
             await InvokeAsync(StateHasChanged).ConfigureAwait(false);
         }
     }
@@ -1090,13 +1155,16 @@ else
             return;
         }
 
-        // Restrict cycling to channels where the selected targets are actually
-        // active; intersect with the user's list, falling back to the primary
-        // set when they don't overlap.
-        var primary = Store.GetPrimaryChannelsForMacs(_lockMacs);
+        // Restrict cycling to channels where the selected targets are
+        // actually active (survey data is respected, including non-standard
+        // channels); intersect with the user's list, falling back to the
+        // primary set when they don't overlap.
+        var primary = Store.GetPrimaryChannelsForMacs(_lockMacs).ToArray();
         if (primary.Length > 0)
         {
-            var restricted = channels.Where(primary.Contains).ToList();
+            // primary is PPS-ordered — keep that order so acquisition starts
+            // on the most active channel, not whatever was typed first.
+            var restricted = primary.Where(channels.Contains).ToList();
             channels = restricted.Count > 0 ? restricted : primary.ToList();
             _detectChannels = string.Join(", ", channels);
         }
@@ -1106,6 +1174,46 @@ else
     }
 
     private void StopDetection() => Coordinator.Stop();
+
+    // One-click hand-off from the survey modal: loads the recommended target
+    // MACs and primary channels into the Detection Coordinator state so the
+    // operator only has to press Start Detection.
+    private void PrimeDetectionFromSurvey()
+    {
+        var rec = Store.LatestRecommendation;
+        if (rec is null)
+        {
+            return;
+        }
+
+        // Targets: the recommended MAC first, then the other top actives on
+        // the recommended channel, capped at the firmware 8-MAC filter limit.
+        var macs = new List<string>();
+        if (!string.IsNullOrWhiteSpace(rec.Mac))
+        {
+            macs.Add(rec.Mac);
+        }
+
+        macs.AddRange(rec.TopMacs
+            .Select(m => m.Mac)
+            .Where(m => !string.IsNullOrWhiteSpace(m))!);
+        _lockMacs = macs.Distinct(StringComparer.OrdinalIgnoreCase).Take(8).ToList()!;
+
+        // Channels: every channel where the selected targets are active, with
+        // the recommended channel guaranteed first — survey data is always
+        // respected, including non-standard channels like 7. The 1/6/11 list
+        // is only the fallback when no scan data covers the targets.
+        var primary = Store.GetPrimaryChannelsForMacs(_lockMacs).ToList();
+        primary.Remove(rec.Channel);
+        primary.Insert(0, rec.Channel);
+        _detectChannels = string.Join(", ", primary);
+
+        // Field (not the LockChannel property) so UpdateLockMac doesn't
+        // overwrite the MAC selection we just made.
+        _lockChannel = rec.Channel;
+        _showAggregate = false;
+        _errorMessage = null;
+    }
 
     private async Task LockAndStream()
     {
@@ -1600,15 +1708,119 @@ else
 
     private sealed record TargetPlacement(string Mac, string X, string Y, string Radius, string Color);
 
-    // ---- Raw subcarrier phase jitter plot ----
-
-    private static readonly string[] PhasePalette =
-        { "#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4", "#42d4f4", "#f032e6", "#bfef45" };
-
-    private static string PhaseColor(int index) => PhasePalette[index % PhasePalette.Length];
-
     private static string FormatSrcMac(ulong mac)
         => $"{(mac >> 40) & 0xFF:X2}:{(mac >> 32) & 0xFF:X2}:{(mac >> 24) & 0xFF:X2}:{(mac >> 16) & 0xFF:X2}:{(mac >> 8) & 0xFF:X2}:{mac & 0xFF:X2}";
+
+    // Per-node convergence progress: every connected node gets a row even
+    // with zero baselines (0/window, Learning) so a starved node is visible
+    // instead of silently absent.
+    private IEnumerable<(string NodeMac, long Frames, int Window, bool Converged, double P95, double Threshold)> GetNodeConvergence()
+        => Store.GetConnectedMacs()
+            .OrderBy(m => m, StringComparer.OrdinalIgnoreCase)
+            .Select(node =>
+            {
+                var canonical = CsiHub.Core.MacAddressFormatter.ToCanonicalCached(node);
+                var links = Dsp.Baselines
+                    .Where(kv => string.Equals(kv.Key.NodeMac, canonical, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                var best = links.OrderByDescending(kv => kv.Value.TotalFrames).FirstOrDefault();
+                return (node,
+                        best.Value?.TotalFrames ?? 0,
+                        best.Value?.WindowSize ?? CsiHub.Core.RoomBaseline.DefaultWindowSize,
+                        links.Any(kv => kv.Value.IsConverged),
+                        best.Value?.PercentileVariance ?? 0.0,
+                        best.Value?.ConvergenceThreshold ?? 0.0);
+            });
+
+    // Tracker rows: per-node PPS, best-link window fill, and the p95 floor
+    // trend series for the delta-var sparkline.
+    private IEnumerable<NodeTrackerRow> GetNodeTrackerRows()
+    {
+        var floorSeries = Dsp.GetFloorSeries();
+        foreach (var node in Store.GetConnectedMacs().OrderBy(m => m, StringComparer.OrdinalIgnoreCase))
+        {
+            var canonical = CsiHub.Core.MacAddressFormatter.ToCanonicalCached(node);
+            var links = Dsp.Baselines
+                .Where(kv => string.Equals(kv.Key.NodeMac, canonical, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            var best = links.OrderByDescending(kv => kv.Value.TotalFrames).FirstOrDefault();
+            _nodePps.TryGetValue(node, out var pps);
+
+            IReadOnlyList<double>? floors = null;
+            var trend = "—";
+            if (best.Value is not null
+                && floorSeries.TryGetValue(best.Key, out var fs)
+                && fs.Count > 1)
+            {
+                floors = fs;
+                trend = FloorTrendLabel(fs);
+            }
+
+            yield return new NodeTrackerRow(
+                node, pps,
+                best.Value?.TotalFrames ?? 0,
+                best.Value?.WindowSize ?? CsiHub.Core.RoomBaseline.DefaultWindowSize,
+                best.Value is not null,
+                links.Any(kv => kv.Value.IsConverged),
+                best.Value?.PercentileVariance ?? 0.0,
+                best.Value?.ConvergenceThreshold ?? 0.0,
+                floors, trend);
+        }
+    }
+
+    private sealed record NodeTrackerRow(
+        string NodeMac, double Pps, long Frames, int Window, bool HasBaseline,
+        bool Converged, double P95, double Threshold,
+        IReadOnlyList<double>? FloorSeries, string TrendLabel)
+    {
+        public double FillPct => Window > 0 ? Math.Min(100.0, Frames * 100.0 / Window) : 0.0;
+    }
+
+    // Compares the recent tail of the floor series against its head: a
+    // decaying floor means the room is stabilizing; rising means drift.
+    private static string FloorTrendLabel(IReadOnlyList<double> floors)
+    {
+        int n = floors.Count;
+        int tail = Math.Max(1, n / 10);
+        double early = floors.Take(tail).Average();
+        double recent = floors.Skip(n - tail).Average();
+        if (early <= 0.0)
+        {
+            return "—";
+        }
+
+        double ratio = recent / early;
+        return ratio < 0.8 ? "ΔVar falling — stabilizing"
+             : ratio > 1.25 ? "ΔVar rising — drifting"
+             : "ΔVar flat";
+    }
+
+    // Maps floor samples into a 720x60 viewBox.
+    private static string FloorPoints(IReadOnlyList<double> values)
+    {
+        const double Left = 4.0, Right = 716.0, Top = 4.0, Bottom = 56.0;
+        if (values.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        double yMax = values.Max();
+        if (yMax <= 0.0)
+        {
+            yMax = 1e-6;
+        }
+
+        var sb = new System.Text.StringBuilder(values.Count * 12);
+        double step = values.Count > 1 ? (Right - Left) / (values.Count - 1) : 0.0;
+        for (int i = 0; i < values.Count; i++)
+        {
+            double x = Left + (i * step);
+            double y = Bottom - (values[i] / yMax) * (Bottom - Top);
+            sb.Append(x.ToString("F1")).Append(',').Append(y.ToString("F1")).Append(' ');
+        }
+
+        return sb.ToString();
+    }
 
     // Picks the variance series for the coordinator's current channel (or the
     // most active overall), preferring the link with the most baseline frames
@@ -1670,31 +1882,6 @@ else
     {
         const double Top = 8.0, Bottom = 108.0;
         return yMax <= 0.0 ? Bottom : Bottom - (Math.Min(value, yMax) / yMax) * (Bottom - Top);
-    }
-
-    // Maps packet index -> X and phase (-pi..+pi) -> Y inside the 720x220 viewBox.
-    // Plot area: x in [34,716], y in [12,208] with 0-phase at the y=110 midline.
-    private static string PhasePoints(IReadOnlyList<double> phases)
-    {
-        const double Left = 34.0, Right = 716.0, MidY = 110.0, HalfAmp = 98.0;
-        if (phases.Count == 0)
-        {
-            return string.Empty;
-        }
-
-        var sb = new System.Text.StringBuilder(phases.Count * 10);
-        double denom = Math.Max(1, phases.Count - 1);
-        for (int i = 0; i < phases.Count; i++)
-        {
-            double x = Left + (i / denom) * (Right - Left);
-            double y = MidY - (phases[i] / Math.PI) * HalfAmp;
-            sb.Append(x.ToString("F1", System.Globalization.CultureInfo.InvariantCulture))
-              .Append(',')
-              .Append(y.ToString("F1", System.Globalization.CultureInfo.InvariantCulture))
-              .Append(' ');
-        }
-
-        return sb.ToString();
     }
 
     private sealed record SyncDiagnosticRow(string Mac, long PulseCount, double LatencyUs, double JitterUs);
