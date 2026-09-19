@@ -157,6 +157,75 @@ public class SensingOrchestratorTests
 
     #endregion
 
+    #region Node Liveness
+
+    [Fact]
+    public void Silent_nodes_are_unregistered_after_liveness_timeout()
+    {
+        // Arrange — all three nodes registered via csi frames during the sweep.
+        var (orch, _, _) = Create();
+        FeedStableStream(orch, Ch6, Target, 5);
+        orch.ExpectedNodeCount.Should().Be(3);
+
+        // Act — nothing heard for over 10 seconds.
+        orch.Tick(T0 + TimeSpan.FromSeconds(11));
+
+        // Assert
+        orch.ExpectedNodeCount.Should().Be(0);
+    }
+
+    [Fact]
+    public void Heartbeat_refreshes_node_liveness()
+    {
+        // Arrange — roster seeded with 3 nodes; only Nodes[0] heartbeats.
+        var (orch, _, _) = Create();
+        orch.OnNodeHeartbeat(Nodes[0], T0);
+
+        // Act — first tick seeds the never-seen nodes' grace period;
+        // Nodes[0] heartbeats again at +12s, inside its window.
+        orch.Tick(T0 + TimeSpan.FromSeconds(5));
+        orch.OnNodeHeartbeat(Nodes[0], T0 + TimeSpan.FromSeconds(12));
+        orch.Tick(T0 + TimeSpan.FromSeconds(16));
+
+        // Assert — grace nodes died 11s after first tick; Nodes[0] lives (4s).
+        orch.ExpectedNodeCount.Should().Be(1);
+
+        // Nodes[0] goes silent too — watchdogged 11s after its last heartbeat.
+        orch.Tick(T0 + TimeSpan.FromSeconds(23));
+        orch.ExpectedNodeCount.Should().Be(0);
+    }
+
+    [Fact]
+    public void Dead_node_does_not_stall_convergence()
+    {
+        // Arrange — locked; two nodes stay alive, the third goes silent.
+        var orch = DriveToAcquiring(new FakeRadio(), new FakeSink(), Fast);
+        var locked = orch.Campaign.LockedChannel!.Value;
+        // Feed only the first two nodes so the third's liveness expires.
+        foreach (var node in Nodes.Take(2))
+        {
+            orch.OnAmplitudeSampleReceived(Sample(node, Target, locked, 1.0, 6_000));
+        }
+
+        // Act — third node silent >10s -> unregistered; survivors converge.
+        orch.Tick(T0 + TimeSpan.FromSeconds(11));
+        orch.ExpectedNodeCount.Should().Be(2);
+        foreach (var node in Nodes.Take(2))
+        {
+            for (var f = 0; f < BaselineTunables.DefaultWindowSize + 1; f++)
+            {
+                orch.OnAmplitudeSampleReceived(Sample(node, Target, locked, f % 2 == 0 ? 1.00 : 1.02, 12_000 + (f * 10)));
+            }
+        }
+
+        orch.Tick(T0 + TimeSpan.FromSeconds(13));
+
+        // Assert — convergence evaluated against the two live nodes only.
+        orch.Campaign.Mode.Should().Be(CampaignMode.Detecting);
+    }
+
+    #endregion
+
     #region Survey Sweep Execution
 
     [Fact]

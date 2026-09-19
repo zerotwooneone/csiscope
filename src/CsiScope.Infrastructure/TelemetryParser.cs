@@ -8,6 +8,7 @@ public enum TelemetryKind : byte
     Csi,
     Ack,
     Config,
+    Heartbeat,
 }
 
 /// <summary>Decoded <c>{"type":"ack"}</c> frame — seq matches the outbound command.</summary>
@@ -16,7 +17,7 @@ public readonly record struct CommandAck(long Seq, bool Success);
 /// <summary>
 /// One decoded NDJSON line. <see cref="Kind"/> selects the meaningful field:
 /// <see cref="Sample"/> for csi, <see cref="Ack"/> for ack,
-/// <see cref="AnnouncedMac"/> for config.
+/// <see cref="AnnouncedMac"/> for config and heartbeat.
 /// </summary>
 public readonly record struct ParsedTelemetry
 {
@@ -77,7 +78,8 @@ public static class TelemetryParser
                     if (reader.ValueTextEquals("csi"u8)) kind = TelemetryKind.Csi;
                     else if (reader.ValueTextEquals("ack"u8)) kind = TelemetryKind.Ack;
                     else if (reader.ValueTextEquals("config"u8)) kind = TelemetryKind.Config;
-                    else return false; // hb, imu, diag — not our concern
+                    else if (reader.ValueTextEquals("hb"u8)) kind = TelemetryKind.Heartbeat;
+                    else return false; // imu, diag — not our concern
                 }
                 else if (reader.ValueTextEquals("mac"u8))
                 {
@@ -101,6 +103,13 @@ public static class TelemetryParser
                 else if (reader.ValueTextEquals("ch"u8))
                 {
                     if (!reader.Read() || !reader.TryGetInt32(out var ch))
+                    {
+                        return false;
+                    }
+
+                    // Validate BEFORE constructing — WifiChannel throws
+                    // ArgumentOutOfRangeException, which must not escape TryParse.
+                    if (ch is < 1 or > 14)
                     {
                         return false;
                     }
@@ -196,6 +205,14 @@ public static class TelemetryParser
                 result = new ParsedTelemetry
                 {
                     Kind = TelemetryKind.Config,
+                    AnnouncedMac = mac,
+                };
+                return true;
+
+            case TelemetryKind.Heartbeat when hasMac:
+                result = new ParsedTelemetry
+                {
+                    Kind = TelemetryKind.Heartbeat,
                     AnnouncedMac = mac,
                 };
                 return true;

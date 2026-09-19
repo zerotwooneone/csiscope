@@ -16,7 +16,7 @@ public class TelemetryParserTests
     [Fact]
     public void Csi_frame_parses_link_identity_rssi_and_channel()
     {
-        // Arrange — src is the packed big-endian ulong for 08:E9:F6:63:9A:CC.
+        // Arrange — src is the packed big-endian ulong for the source MAC.
         var line = Line("""{"type":"csi","mac":"14:C1:9F:2E:53:D0","src":9654321234567,"ch":6,"seq":7,"rssi":-55,"t":12345,"c":[3,4]}""");
 
         // Act
@@ -64,12 +64,33 @@ public class TelemetryParserTests
     [InlineData("""{"type":"csi","mac":"14:C1:9F:2E:53:D0","ch":6,"rssi":-55,"c":[3,4]}""")]             // missing src
     [InlineData("""{"type":"csi","mac":"14:C1:9F:2E:53:D0","src":1,"rssi":-55,"c":[3,4]}""")]            // missing ch
     [InlineData("""{"type":"csi","mac":"14:C1:9F:2E:53:D0","src":1,"ch":6,"rssi":5,"c":[3,4]}""")]       // invalid rssi
+    [InlineData("""{"type":"csi","mac":"14:C1:9F:2E:53:D0","src":1,"ch":99,"rssi":-55,"c":[3,4]}""")]    // invalid channel — must not throw
+    [InlineData("""{"type":"csi","mac":"14:C1:9F:2E:53:D0","src":1,"ch":0,"rssi":-55,"c":[3,4]}""")]     // channel zero
     [InlineData("""{"type":"csi","mac":"14:C1:9F:2E:53:D0","src":1,"ch":6,"rssi":-55,"c":[3,4]""")]      // torn json
-    [InlineData("""{"type":"hb","mac":"14:C1:9F:2E:53:D0","uptime":5}""")]                             // heartbeat — skipped
+    [InlineData("""{"type":"imu","mac":"14:C1:9F:2E:53:D0","qw":1.0}""")]                               // imu — skipped
     public void Malformed_or_incomplete_frames_return_false(string json)
     {
         // Act & Assert
         TelemetryParser.TryParse(Line(json), Now, out _).Should().BeFalse();
+    }
+
+    #endregion
+
+    #region Heartbeat Frames
+
+    [Fact]
+    public void Heartbeat_frame_parses_node_mac()
+    {
+        // Arrange
+        var line = Line("""{"type":"hb","mac":"14:C1:9F:2E:53:D0","state":"standby","uptime":5}""");
+
+        // Act
+        var ok = TelemetryParser.TryParse(line, Now, out var frame);
+
+        // Assert
+        ok.Should().BeTrue();
+        frame.Kind.Should().Be(TelemetryKind.Heartbeat);
+        frame.AnnouncedMac.Should().Be(MacAddress.Parse("14:C1:9F:2E:53:D0"));
     }
 
     #endregion

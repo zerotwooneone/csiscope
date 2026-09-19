@@ -31,11 +31,16 @@ public sealed class SensingOrchestrator
     private static readonly TimeSpan DormancyThreshold = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan PruneInterval = TimeSpan.FromMinutes(1);
 
+    // A node silent this long is unregistered so it can't stall Acquiring.
+    private static readonly TimeSpan NodeLivenessTimeout = TimeSpan.FromSeconds(10);
+
     private readonly IRadioCommandPort _radio;
     private readonly IAnomalySink _anomalySink;
     private readonly SensingThresholds _thresholds;
     private readonly BaselineTunables _tunables;
     private readonly HashSet<MacAddress> _expectedNodes;
+    private readonly Dictionary<MacAddress, DateTimeOffset> _nodeLastSeen = new();
+    private DateTimeOffset _firstTickAt = DateTimeOffset.MinValue;
 
     private readonly Dictionary<LinkIdentity, LinkBaseline> _baselines = new();
     private readonly Dictionary<WifiChannel, ChannelActivity> _activity = new();
@@ -79,11 +84,32 @@ public sealed class SensingOrchestrator
     /// <summary>Live baseline count — diagnostics and pruning verification.</summary>
     public int TrackedBaselineCount => _baselines.Count;
 
+    /// <summary>Registered node count — diagnostics and watchdog verification.</summary>
+    public int ExpectedNodeCount => _expectedNodes.Count;
+
     /// <summary>
-    /// Register a node that self-announced via a config frame. Single-writer:
-    /// call from the same thread as ingestion/tick.
+    /// Register a node that self-announced via a config frame and seed its
+    /// liveness clock. Single-writer: call from the ingestion/tick thread.
     /// </summary>
-    public void RegisterExpectedNode(MacAddress node) => _expectedNodes.Add(node);
+    public void RegisterExpectedNode(MacAddress node, DateTimeOffset at)
+    {
+        _expectedNodes.Add(node);
+        _nodeLastSeen[node] = at;
+    }
+
+    /// <summary>Drop a node from the roster — watchdog or explicit disconnect.</summary>
+    public void UnregisterExpectedNode(MacAddress node)
+    {
+        _expectedNodes.Remove(node);
+        _nodeLastSeen.Remove(node);
+    }
+
+    /// <summary>Heartbeat frame — the node is alive; (re)register and touch liveness.</summary>
+    public void OnNodeHeartbeat(MacAddress node, DateTimeOffset at)
+    {
+        _expectedNodes.Add(node);
+        _nodeLastSeen[node] = at;
+    }
 
     /// <summary>
     /// Telemetry hot path — strictly synchronous, zero-allocation on repeat
@@ -100,6 +126,10 @@ public sealed class SensingOrchestrator
         {
             return null;
         }
+
+        // A node producing telemetry is alive — (re)register and touch liveness.
+        _expectedNodes.Add(sample.Link.Node);
+        _nodeLastSeen[sample.Link.Node] = sample.Timestamp;
 
         // Channel-confirmation: sustained contradiction means the last hop
         // command was dropped — reissue it. A dead radio produces no frames
@@ -142,6 +172,23 @@ public sealed class SensingOrchestrator
     /// </summary>
     public void Tick(DateTimeOffset now)
     {
+        // Housekeeping runs every tick — even mid-plan. A silent node must be
+        // unregistered during sweeps too, or it stalls the next acquisition.
+        if (_firstTickAt == DateTimeOffset.MinValue)
+        {
+            _firstTickAt = now;
+        }
+
+        // Dormancy pruning, throttled — dictionaries can't be modified during
+        // enumeration, so stale keys are collected first (cold-path alloc).
+        if (now - _lastPruneAt > PruneInterval)
+        {
+            _lastPruneAt = now;
+            PruneDormant(now);
+        }
+
+        RunNodeWatchdog(now);
+
         if (_activePlan is not null)
         {
             AdvancePlan(now);
@@ -158,13 +205,30 @@ public sealed class SensingOrchestrator
         {
             BeginPlan(BuildSurveyPlan(), now, auditReturnTo: null);
         }
+    }
 
-        // Dormancy pruning, throttled — dictionaries can't be modified during
-        // enumeration, so stale keys are collected first (cold-path alloc).
-        if (now - _lastPruneAt > PruneInterval)
+    /// <summary>
+    /// Unregisters nodes silent for <see cref="NodeLivenessTimeout"/>. Nodes
+    /// configured but never seen get a grace period measured from the first tick.
+    /// </summary>
+    private void RunNodeWatchdog(DateTimeOffset now)
+    {
+        List<MacAddress>? deadNodes = null;
+        foreach (var node in _expectedNodes)
         {
-            _lastPruneAt = now;
-            PruneDormant(now);
+            var lastSeen = _nodeLastSeen.TryGetValue(node, out var seen) ? seen : _firstTickAt;
+            if (now - lastSeen > NodeLivenessTimeout)
+            {
+                (deadNodes ??= new List<MacAddress>()).Add(node);
+            }
+        }
+
+        if (deadNodes is not null)
+        {
+            foreach (var node in deadNodes)
+            {
+                UnregisterExpectedNode(node);
+            }
         }
     }
 

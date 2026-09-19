@@ -6,15 +6,15 @@ using Xunit;
 
 namespace CsiScope.Infrastructure.Tests;
 
-public class SerialRadioAdapterTests
+public class NodeSerialAdapterTests
 {
     private static readonly WifiChannel Ch6 = new(6);
     private static readonly MacAddress Target = MacAddress.Parse("08:E9:F6:63:9A:CC");
 
-    private static (SerialRadioAdapter Adapter, List<byte[]> Sent) Create(TimeSpan? ackTimeout = null)
+    private static (NodeSerialAdapter Adapter, List<byte[]> Sent) Create(TimeSpan? ackTimeout = null)
     {
         var sent = new List<byte[]>();
-        var adapter = new SerialRadioAdapter(
+        var adapter = new NodeSerialAdapter(
             (bytes, _) =>
             {
                 sent.Add(bytes.ToArray());
@@ -35,8 +35,8 @@ public class SerialRadioAdapterTests
         var (adapter, sent) = Create();
         await using var _ = adapter;
 
-        // Act — don't await yet; complete via ack after the frame lands.
-        var pending = adapter.BroadcastSetRfAsync(Ch6, ImmutableArray.Create(Target));
+        // Act
+        var pending = adapter.SendSetRfAsync(Ch6, ImmutableArray.Create(Target));
         await WaitFor(() => sent.Count == 1);
 
         // Assert — passive schema: ch, bw, mode, seq, mac_filter, newline-framed.
@@ -61,7 +61,7 @@ public class SerialRadioAdapterTests
         await using var _ = adapter;
 
         // Act
-        var pending = adapter.BroadcastSetRfAsync(Ch6, ImmutableArray<MacAddress>.Empty);
+        var pending = adapter.SendSetRfAsync(Ch6, ImmutableArray<MacAddress>.Empty);
         await WaitFor(() => sent.Count == 1);
 
         // Assert — dwell_ms scan variant; no mac_filter key at all.
@@ -86,7 +86,7 @@ public class SerialRadioAdapterTests
         await using var _ = adapter;
 
         // Act
-        var pending = adapter.BroadcastSetRfAsync(Ch6, ImmutableArray.Create(Target));
+        var pending = adapter.SendSetRfAsync(Ch6, ImmutableArray.Create(Target));
         await WaitFor(() => sent.Count == 1);
         adapter.NotifyAck(1, success: true);
 
@@ -102,11 +102,28 @@ public class SerialRadioAdapterTests
         await using var _ = adapter;
 
         // Act
-        var result = await adapter.BroadcastSetRfAsync(Ch6, ImmutableArray.Create(Target));
+        var result = await adapter.SendSetRfAsync(Ch6, ImmutableArray.Create(Target));
 
         // Assert — two wire writes (initial + one retry), then false.
         result.Should().BeFalse();
         sent.Count.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task Nack_fails_fast_without_retry()
+    {
+        // Arrange — firmware rejects the command (success:false).
+        var (adapter, sent) = Create(ackTimeout: TimeSpan.FromMilliseconds(50));
+        await using var _ = adapter;
+
+        // Act
+        var pending = adapter.SendSetRfAsync(Ch6, ImmutableArray.Create(Target));
+        await WaitFor(() => sent.Count == 1);
+        adapter.NotifyAck(1, success: false);
+
+        // Assert — one write only; a NACK is terminal, not retried.
+        (await pending).Should().BeFalse();
+        sent.Count.Should().Be(1);
     }
 
     [Fact]
@@ -117,7 +134,7 @@ public class SerialRadioAdapterTests
         await using var _ = adapter;
 
         // Act
-        var pending = adapter.BroadcastSetRfAsync(Ch6, ImmutableArray.Create(Target));
+        var pending = adapter.SendSetRfAsync(Ch6, ImmutableArray.Create(Target));
         await WaitFor(() => sent.Count == 2); // retried
         adapter.NotifyAck(1, success: true);
 
@@ -133,12 +150,67 @@ public class SerialRadioAdapterTests
         await using var _ = adapter;
 
         // Act
-        var pending = adapter.BroadcastSetRfAsync(Ch6, ImmutableArray.Create(Target));
+        var pending = adapter.SendSetRfAsync(Ch6, ImmutableArray.Create(Target));
         await WaitFor(() => sent.Count == 1);
         adapter.NotifyAck(999, success: true); // stale seq
 
         // Assert — still pending; eventually times out false.
         (await pending).Should().BeFalse();
+    }
+
+    #endregion
+
+    #region Queue Safety
+
+    [Fact]
+    public async Task Evicted_command_completes_false_instead_of_hanging()
+    {
+        // Arrange — a writer that blocks until released so the queue backs up.
+        var gate = new TaskCompletionSource();
+        var adapter = new NodeSerialAdapter(
+            (_, _) => new ValueTask(gate.Task),
+            ackTimeout: TimeSpan.FromMilliseconds(10));
+        await using var _ = adapter;
+
+        // Act — fill the queue (32) plus overflow; the first send blocks the loop.
+        var tasks = new List<Task<bool>>();
+        for (var i = 0; i < 40; i++)
+        {
+            tasks.Add(adapter.SendSetRfAsync(Ch6, ImmutableArray.Create(Target)));
+        }
+
+        // Evictions are synchronous — at least 7 commands already completed false.
+        tasks.Count(t => t.IsCompleted).Should().BeGreaterThanOrEqualTo(7);
+
+        // Release the write so the loop drains (each command times out fast).
+        gate.SetResult();
+        var results = await Task.WhenAll(tasks).WaitAsync(TimeSpan.FromSeconds(10));
+
+        // Assert — every command completed; none hung, none acked.
+        results.Should().OnlyContain(r => r == false);
+    }
+
+    [Fact]
+    public async Task Write_exception_fails_command_but_keeps_loop_alive()
+    {
+        // Arrange — first write throws, second succeeds.
+        var calls = 0;
+        var adapter = new NodeSerialAdapter(
+            (_, _) => ++calls == 1
+                ? throw new IOException("port gone")
+                : ValueTask.CompletedTask,
+            ackTimeout: TimeSpan.FromMilliseconds(50));
+        await using var _ = adapter;
+
+        // Act
+        var first = await adapter.SendSetRfAsync(Ch6, ImmutableArray.Create(Target));
+        var second = adapter.SendSetRfAsync(Ch6, ImmutableArray.Create(Target));
+        await WaitFor(() => calls == 2);
+        adapter.NotifyAck(2, success: true);
+
+        // Assert — the loop survived the transport failure.
+        first.Should().BeFalse();
+        (await second).Should().BeTrue();
     }
 
     #endregion
