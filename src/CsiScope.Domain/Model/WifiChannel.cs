@@ -25,7 +25,7 @@ public readonly record struct WifiChannel : IComparable<WifiChannel>
 
     public override string ToString() => Value.ToString();
 
-    public static implicit operator int(WifiChannel channel) => channel.Value;
+    public static explicit operator int(WifiChannel channel) => channel.Value;
 
     public static explicit operator WifiChannel(int value) => new(value);
 }

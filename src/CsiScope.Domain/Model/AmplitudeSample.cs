@@ -9,4 +9,4 @@ public readonly record struct AmplitudeSample(
     LinkIdentity Link,
     DateTimeOffset Timestamp,
     double Amplitude,
-    short Rssi);
+    Rssi Rssi);

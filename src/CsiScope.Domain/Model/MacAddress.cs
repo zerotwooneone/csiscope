@@ -50,7 +50,7 @@ public readonly record struct MacAddress : IEquatable<MacAddress>
                 return false;
             }
 
-            value = (value << 4) | (ulong)digit;
+            value = (value << 4) | (uint)digit;
             nibbles++;
         }
 

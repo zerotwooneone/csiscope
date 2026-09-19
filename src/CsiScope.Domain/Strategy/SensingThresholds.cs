@@ -1,3 +1,5 @@
+using CsiScope.Domain.Model;
+
 namespace CsiScope.Domain.Strategy;
 
 /// <summary>
@@ -21,7 +23,16 @@ public sealed record SensingThresholds
     public double ReacquireThreshold { get; init; } = 0.5;
 
     /// <summary>Minimum candidate activity score to justify acquisition.</summary>
-    public double MinActivityScore { get; init; } = 1.0;
+    public ActivityScore MinActivityScore { get; init; } = new(1.0);
+
+    /// <summary>Expected packets-per-second for the primary target — normalizes the TargetPps confidence component.</summary>
+    public double ExpectedTargetPps { get; init; } = 5.0;
+
+    /// <summary>Time without frames before the Age confidence component reaches zero.</summary>
+    public TimeSpan StaleAfter { get; init; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>Per-channel dwell during a survey sweep.</summary>
+    public TimeSpan SurveyDwell { get; init; } = TimeSpan.FromMilliseconds(500);
 
     /// <summary>Audit cadence at full confidence.</summary>
     public TimeSpan MaxAuditInterval { get; init; } = TimeSpan.FromSeconds(60);

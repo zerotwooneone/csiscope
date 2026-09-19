@@ -11,15 +11,7 @@ namespace CsiScope.Domain.Baselining;
 /// </summary>
 public sealed class LinkBaseline
 {
-    public const int DefaultWindowSize = 64;
-
-    private static readonly TimeSpan DefaultTripwireCooldown = TimeSpan.FromSeconds(1);
-
-    private readonly int _windowSize;
-    private readonly double _convergenceMultiplier;
-    private readonly double _tripwireMultiplier;
-    private readonly int _relockAfterMisses;
-    private readonly TimeSpan _tripwireCooldown;
+    private readonly BaselineTunables _tunables;
     private double _mean;
     private double _m2;
     private double _varianceFloor;
@@ -28,30 +20,16 @@ public sealed class LinkBaseline
     private int _convergenceMisses;
     private DateTimeOffset _lastTripwireAt = DateTimeOffset.MinValue;
 
-    /// <param name="relockAfterMisses">Sustained above-threshold evaluations
-    /// before the floor re-locks at the new level — prevents a quiet-transient
-    /// latch from locking out forever.</param>
-    /// <param name="tripwireCooldown">Minimum gap between emitted anomalies so
-    /// a sustained disturbance doesn't flood the event stream.</param>
-    public LinkBaseline(
-        LinkIdentity link,
-        int windowSize = DefaultWindowSize,
-        double convergenceMultiplier = 1.5,
-        double tripwireMultiplier = 2.5,
-        int relockAfterMisses = 128,
-        TimeSpan? tripwireCooldown = null)
+    public LinkBaseline(LinkIdentity link, BaselineTunables? tunables = null)
     {
-        if (windowSize < 2)
+        var t = tunables ?? BaselineTunables.Default;
+        if (t.WindowSize < 2)
         {
-            throw new ArgumentOutOfRangeException(nameof(windowSize), windowSize, "Window must hold at least 2 frames.");
+            throw new ArgumentOutOfRangeException(nameof(tunables), t.WindowSize, "Window must hold at least 2 frames.");
         }
 
         Link = link;
-        _windowSize = windowSize;
-        _convergenceMultiplier = convergenceMultiplier;
-        _tripwireMultiplier = tripwireMultiplier;
-        _relockAfterMisses = relockAfterMisses;
-        _tripwireCooldown = tripwireCooldown ?? DefaultTripwireCooldown;
+        _tunables = t;
     }
 
     public LinkIdentity Link { get; }
@@ -68,10 +46,10 @@ public sealed class LinkBaseline
 
     public double ConvergenceThreshold => _convergenceThreshold;
 
-    public int WindowSize => _windowSize;
+    public int WindowSize => _tunables.WindowSize;
 
     /// <summary>Fraction of the Welford window filled (0..1).</summary>
-    public double FillFraction => Math.Min(1.0, (double)TotalFrames / _windowSize);
+    public double FillFraction => Math.Min(1.0, (double)TotalFrames / _tunables.WindowSize);
 
     /// <summary>
     /// True once the window is full and variance sits under the locked
@@ -101,11 +79,11 @@ public sealed class LinkBaseline
             double squared = deviation * deviation;
             double ratio = _varianceFloor > 1e-12 ? squared / _varianceFloor : 0.0;
 
-            if (ratio > _tripwireMultiplier
-                && sample.Timestamp - _lastTripwireAt > _tripwireCooldown)
+            if (ratio > _tunables.TripwireMultiplier
+                && sample.Timestamp - _lastTripwireAt > _tunables.TripwireCooldown)
             {
                 _lastTripwireAt = sample.Timestamp;
-                anomaly = new AnomalyDetected(Link, ratio, sample.Timestamp);
+                anomaly = new AnomalyDetected(Link, new DeviationRatio(ratio), sample.Timestamp);
             }
         }
 
@@ -119,7 +97,7 @@ public sealed class LinkBaseline
     // window; sustained elevation re-locks it instead of latching out forever.
     private bool EvaluateConvergence()
     {
-        if (TotalFrames < _windowSize)
+        if (TotalFrames < _tunables.WindowSize)
         {
             return false;
         }
@@ -128,7 +106,7 @@ public sealed class LinkBaseline
         if (!_thresholdLocked)
         {
             _varianceFloor = variance;
-            _convergenceThreshold = _convergenceMultiplier * variance;
+            _convergenceThreshold = _tunables.ConvergenceMultiplier * variance;
             _thresholdLocked = true;
         }
 
@@ -138,13 +116,30 @@ public sealed class LinkBaseline
             return true;
         }
 
-        if (++_convergenceMisses >= _relockAfterMisses)
+        if (++_convergenceMisses >= _tunables.RelockAfterMisses)
         {
             _varianceFloor = variance;
-            _convergenceThreshold = _convergenceMultiplier * variance;
+            _convergenceThreshold = _tunables.ConvergenceMultiplier * variance;
             _convergenceMisses = 0;
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Clears all Welford state — window fill, floor, latch, and cooldown —
+    /// so the entity can be reused for a Reacquire without allocation.
+    /// </summary>
+    public void Reset()
+    {
+        _mean = 0;
+        _m2 = 0;
+        TotalFrames = 0;
+        LastFrameAt = DateTimeOffset.MinValue;
+        _varianceFloor = 0;
+        _convergenceThreshold = 0;
+        _thresholdLocked = false;
+        _convergenceMisses = 0;
+        _lastTripwireAt = DateTimeOffset.MinValue;
     }
 }

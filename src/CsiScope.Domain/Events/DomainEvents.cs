@@ -13,7 +13,7 @@ public sealed record BaselineConverged(LinkIdentity Link, DateTimeOffset At);
 /// Deliberately single-link — multi-link shadowing correlation is a later
 /// consumer of this stream, not part of this layer.
 /// </summary>
-public sealed record AnomalyDetected(LinkIdentity Link, double DeviationRatio, DateTimeOffset At);
+public sealed record AnomalyDetected(LinkIdentity Link, DeviationRatio DeviationRatio, DateTimeOffset At);
 
 /// <summary>The campaign abandoned a lock; <see cref="Reason"/> routes the decay path.</summary>
 public sealed record ConfidenceDegraded(
