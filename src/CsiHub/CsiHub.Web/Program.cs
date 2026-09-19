@@ -15,6 +15,7 @@ builder.Services.AddSingleton<CsiNodeConfigurationService>();
 builder.Services.AddSingleton<RfChannelEvaluator>();
 builder.Services.AddSingleton<CsiNodeStateStore>();
 builder.Services.AddSingleton<IHostedService>(provider => provider.GetRequiredService<CsiNodeStateStore>());
+builder.Services.AddSingleton<DetectionCoordinator>();
 builder.Services.AddSingleton<HardwareConfigService>();
 builder.Services.AddSingleton<IHostedService>(provider => provider.GetRequiredService<HardwareConfigService>());
 

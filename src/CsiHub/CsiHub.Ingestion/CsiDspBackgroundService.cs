@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using System.Linq;
 using System.Numerics;
 using CsiHub.Core;
@@ -45,6 +47,15 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
     private readonly ConcurrentDictionary<(string NodeMac, ulong SrcMac, int Channel), PhaseCoherence> _phaseCoherence = new();
     private const int PhaseHistoryCapacity = 128;
     private readonly ConcurrentDictionary<(string NodeMac, ulong SrcMac, int Channel), PhaseHistoryBuffer> _phaseHistory = new();
+
+    // Tripwire detection: 300 slots at ~5 Hz gives a 60 s rolling window.
+    private const int VarianceHistoryCapacity = 300;
+    private static readonly TimeSpan VarianceSampleInterval = TimeSpan.FromMilliseconds(200);
+    private static readonly TimeSpan TripwireCooldown = TimeSpan.FromSeconds(1);
+    private const int MaxRecentTripwires = 50;
+    private readonly ConcurrentDictionary<(string NodeMac, ulong SrcMac, int Channel), VarianceHistoryBuffer> _varianceHistory = new();
+    private readonly ConcurrentDictionary<(string NodeMac, ulong SrcMac, int Channel), DateTimeOffset> _lastTripwireAt = new();
+    private readonly ConcurrentQueue<TripwireEvent> _recentTripwires = new();
     private bool _subcarrierWarned;
     private volatile IReadOnlyDictionary<string, AoaEstimator.SensorPosition> _sensorPositions =
         new Dictionary<string, AoaEstimator.SensorPosition>(StringComparer.OrdinalIgnoreCase);
@@ -54,15 +65,43 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
 
     private CancellationTokenSource? _cts;
     private Task? _task;
+    private readonly Meter _meter;
 
     public CsiDspBackgroundService(
         CsiIngestionChannel channel,
         ILogger<CsiDspBackgroundService> logger,
-        IOptionsMonitor<CsiAoaOptions> aoaOptions)
+        IOptionsMonitor<CsiAoaOptions> aoaOptions,
+        IMeterFactory? meterFactory = null)
     {
         _channel = channel;
         _logger = logger;
         _aoaOptions = aoaOptions;
+        _meter = meterFactory?.Create("CsiScope.Dsp") ?? new Meter("CsiScope.Dsp");
+
+        // Poll-driven: the callback only runs when a metrics listener
+        // (dotnet-counters, OTLP exporter) observes the instrument, so the
+        // per-frame DSP path stays allocation-free.
+        _meter.CreateObservableGauge<double>("csi.baseline.variance", ObserveBaselineVariance);
+    }
+
+    private IEnumerable<Measurement<double>> ObserveBaselineVariance()
+    {
+        foreach (var (key, baseline) in _baselines)
+        {
+            if (!baseline.IsInitialized)
+            {
+                continue;
+            }
+
+            var tags = new TagList
+            {
+                { "Channel", key.Channel },
+                { "NodeMac", key.NodeMac },
+                { "SrcMac", key.SrcMac },
+            };
+
+            yield return new Measurement<double>(baseline.PercentileVariance, tags);
+        }
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
@@ -197,6 +236,72 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
     public sealed record PhaseSeries(string NodeMac, string SrcMac, int Channel, int SubcarrierIndex, double[] Phases);
 
     /// <summary>
+    /// A motion/anomaly detection: a frame's deviation from the learned baseline
+    /// exceeded the converged p95 variance floor times the configured multiplier.
+    /// </summary>
+    public sealed record TripwireEvent(
+        DateTimeOffset Timestamp,
+        string NodeMac,
+        ulong SrcMac,
+        int Channel,
+        double LiveVariance,
+        double BaselineFloor,
+        double Ratio);
+
+    /// <summary>
+    /// Recent tripwire events, newest first. Bounded to the last 50.
+    /// </summary>
+    public IReadOnlyList<TripwireEvent> GetRecentTripwires()
+    {
+        var events = _recentTripwires.ToArray();
+        Array.Reverse(events);
+        return events;
+    }
+
+    /// <summary>
+    /// Downsampled (~5 Hz) live-deviation time series per link, oldest to newest.
+    /// Covers roughly the last 60 seconds per (node, source, channel) tuple.
+    /// </summary>
+    public IReadOnlyDictionary<(string NodeMac, ulong SrcMac, int Channel), IReadOnlyList<double>> GetVarianceSeries()
+    {
+        var result = new Dictionary<(string NodeMac, ulong SrcMac, int Channel), IReadOnlyList<double>>();
+        foreach (var kv in _varianceHistory)
+        {
+            var snapshot = kv.Value.Snapshot();
+            if (snapshot.Length > 0)
+            {
+                result[kv.Key] = snapshot;
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Mean squared deviation of a single frame from the baseline's running
+    /// mean, in the same scaled units as the Welford variance. Single pass,
+    /// no allocation.
+    /// </summary>
+    private static double ComputeFrameDeviation(double[] csi, RoomBaseline baseline)
+    {
+        var mean = baseline.Mean;
+        int n = Math.Min(csi.Length, mean.Length);
+        if (n == 0)
+        {
+            return 0.0;
+        }
+
+        double sum = 0.0;
+        for (int i = 0; i < n; i++)
+        {
+            double d = (csi[i] * RoomBaseline.CsiInputScale) - mean[i];
+            sum += d * d;
+        }
+
+        return sum / n;
+    }
+
+    /// <summary>
     /// Replaces the sensor-position map used for AoA. Called by the geometry store
     /// whenever the user's saved array assignment changes (and once at startup).
     /// </summary>
@@ -274,6 +379,41 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
                         csiBaseline.Update(payload.Csi, dt, RoomBaseline.CsiInputScale);
                         csiBaseline.LastSeen = payload.ReceivedAt;
                         _lastUpdateAt[key] = payload.ReceivedAt;
+
+                        // Live deviation = mean squared distance of this frame from
+                        // the learned baseline mean. Near zero in a static room,
+                        // spikes when multipath changes (motion). Recorded into a
+                        // downsampled history and compared against the converged
+                        // p95 floor for the tripwire.
+                        double liveVariance = ComputeFrameDeviation(payload.Csi, csiBaseline);
+                        _varianceHistory.GetOrAdd(key, _ => new VarianceHistoryBuffer(VarianceHistoryCapacity))
+                            .Add(liveVariance, payload.ReceivedAt);
+
+                        if (csiBaseline.IsConverged &&
+                            liveVariance > csiBaseline.PercentileVariance * aoaOptions.TripwireVarianceMultiplier &&
+                            (!_lastTripwireAt.TryGetValue(key, out var lastTrip) ||
+                             payload.ReceivedAt - lastTrip > TripwireCooldown))
+                        {
+                            _lastTripwireAt[key] = payload.ReceivedAt;
+                            var tripwire = new TripwireEvent(
+                                payload.ReceivedAt,
+                                key.NodeMac,
+                                key.SrcMac,
+                                key.Channel,
+                                liveVariance,
+                                csiBaseline.PercentileVariance,
+                                liveVariance / Math.Max(csiBaseline.PercentileVariance, 1e-12));
+                            _recentTripwires.Enqueue(tripwire);
+                            while (_recentTripwires.Count > MaxRecentTripwires)
+                            {
+                                _recentTripwires.TryDequeue(out _);
+                            }
+
+                            _logger.LogWarning(
+                                "Tripwire: {NodeMac} <- {SrcMac} ch{Channel} deviation {Live:F4} = {Ratio:F1}x floor {Floor:F4}",
+                                key.NodeMac, FormatMac(key.SrcMac), key.Channel,
+                                liveVariance, tripwire.Ratio, csiBaseline.PercentileVariance);
+                        }
 
                         var sample = GetSubcarrierSample(payload.Csi, aoaOptions.SubcarrierIndex);
                         ScanCsiHealth(payload.Csi, payload.CsiNonZero, aoaOptions.SubcarrierIndex, key);
@@ -543,6 +683,59 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
     }
 
     /// <summary>
+    /// Fixed-capacity ring buffer of live-deviation samples, time-throttled so
+    /// each link records at most one sample per <see cref="VarianceSampleInterval"/>.
+    /// Snapshot returns the contents oldest-to-newest.
+    /// </summary>
+    private sealed class VarianceHistoryBuffer
+    {
+        private readonly double[] _buf;
+        private readonly object _gate = new();
+        private int _head;
+        private int _count;
+        private DateTimeOffset _lastAdd = DateTimeOffset.MinValue;
+
+        public VarianceHistoryBuffer(int capacity)
+        {
+            _buf = new double[capacity];
+        }
+
+        public void Add(double value, DateTimeOffset now)
+        {
+            lock (_gate)
+            {
+                if (now - _lastAdd < VarianceSampleInterval)
+                {
+                    return;
+                }
+
+                _lastAdd = now;
+                _buf[_head] = value;
+                _head = (_head + 1) % _buf.Length;
+                if (_count < _buf.Length)
+                {
+                    _count++;
+                }
+            }
+        }
+
+        public double[] Snapshot()
+        {
+            lock (_gate)
+            {
+                var result = new double[_count];
+                int start = _count < _buf.Length ? 0 : _head;
+                for (int i = 0; i < _count; i++)
+                {
+                    result[i] = _buf[(start + i) % _buf.Length];
+                }
+
+                return result;
+            }
+        }
+    }
+
+    /// <summary>
     /// Fixed-capacity ring buffer of raw phase angles (radians). Snapshot returns
     /// the contents oldest-to-newest so the UI can plot them as a time series.
     /// </summary>
@@ -596,6 +789,8 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
                 _baselines.TryRemove(key, out _))
             {
                 _lastUpdateAt.TryRemove(key, out _);
+                _varianceHistory.TryRemove(key, out _);
+                _lastTripwireAt.TryRemove(key, out _);
             }
         }
     }
@@ -608,6 +803,7 @@ public sealed class CsiDspBackgroundService : IHostedService, IAsyncDisposable
     public ValueTask DisposeAsync()
     {
         _cts?.Dispose();
+        _meter.Dispose();
         return ValueTask.CompletedTask;
     }
 }

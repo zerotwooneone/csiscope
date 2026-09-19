@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
+using CsiHub.Core;
 using CsiHub.Features.Home.Models;
 using CsiHub.Ingestion;
 using CsiHub.Ingestion.Channels;
@@ -62,6 +63,62 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
     /// Combined 1-13 RF scan results aggregated from all participating nodes.
     /// </summary>
     public IReadOnlyDictionary<int, RfChannelAggregate> CombinedRfScan => _combinedRfScan;
+
+    /// <summary>
+    /// Ranks transmitters across every scanned channel by total packet count.
+    /// Multicast and locally-administered (randomized probe-request) MACs are
+    /// excluded; the same transmitter seen on multiple channels is merged into
+    /// one entry (packets summed, best RSSI kept, lowest AmpVar kept).
+    /// </summary>
+    public IReadOnlyList<RfMacMetrics> GetTopRankedMacs(int count = 8, long minPackets = 50)
+    {
+        var merged = new Dictionary<string, RfMacMetrics>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var channel in _combinedRfScan.Values)
+        {
+            foreach (var mac in channel.TopMacs.Values)
+            {
+                if (string.IsNullOrWhiteSpace(mac.Mac))
+                {
+                    continue;
+                }
+
+                var canonical = MacAddressFormatter.ToCanonicalCached(mac.Mac);
+                if (MacAddressFormatter.IsMulticastOrLocal(canonical))
+                {
+                    continue;
+                }
+
+                if (merged.TryGetValue(canonical, out var existing))
+                {
+                    merged[canonical] = new RfMacMetrics
+                    {
+                        Mac = existing.Mac,
+                        Packets = existing.Packets + mac.Packets,
+                        Errors = existing.Errors + mac.Errors,
+                        RssiMin = Math.Min(existing.RssiMin, mac.RssiMin),
+                        RssiMax = Math.Max(existing.RssiMax, mac.RssiMax),
+                        RssiAvg = Math.Max(existing.RssiAvg, mac.RssiAvg),
+                        DurationMs = Math.Max(existing.DurationMs, mac.DurationMs),
+                        AmpVar = MinAmpVar(existing.AmpVar, mac.AmpVar),
+                    };
+                }
+                else
+                {
+                    merged[canonical] = mac;
+                }
+            }
+        }
+
+        return merged.Values
+            .Where(m => m.Packets >= minPackets)
+            .OrderByDescending(m => m.Packets)
+            .Take(Math.Clamp(count, 1, 8))
+            .ToList();
+    }
+
+    private static double? MinAmpVar(double? a, double? b)
+        => a is null ? b : b is null ? a : Math.Min(a.Value, b.Value);
 
     /// <summary>
     /// The current channel and target MAC recommendation.
@@ -812,6 +869,13 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
                 continue;
             }
 
+            // Drop multicast and locally-administered (randomized probe-request)
+            // addresses so they can never be baselined or pushed into mac_filter.
+            if (MacAddressFormatter.IsMulticastOrLocal(MacAddressFormatter.ToCanonicalCached(mac.Mac)))
+            {
+                continue;
+            }
+
             if (destination.TryGetValue(mac.Mac, out var existing))
             {
                 var packets = existing.Packets + mac.Packets;
@@ -850,7 +914,9 @@ public sealed class CsiNodeStateStore : IHostedService, IAsyncDisposable
     /// </summary>
     private static RfChannelMetrics ToRfChannelMetrics(ChanDiagMetrics diag)
     {
-        var topMacs = diag.Macs?.Select(m =>
+        var topMacs = diag.Macs?
+            .Where(m => !MacAddressFormatter.IsMulticastOrLocal(MacAddressFormatter.ToCanonicalCached(m.Src)))
+            .Select(m =>
         {
             double spread = 2.0 * Math.Sqrt(Math.Max(0.0, m.RssiVar));
             return new RfMacMetrics

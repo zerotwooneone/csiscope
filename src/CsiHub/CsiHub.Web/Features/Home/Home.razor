@@ -11,6 +11,7 @@
 @inject CsiNodeConfigurationService ConfigService
 @inject CsiDspBackgroundService Dsp
 @inject HardwareConfigService Config
+@inject DetectionCoordinator Coordinator
 @inject IJSRuntime JS
 @implements IAsyncDisposable
 
@@ -23,6 +24,19 @@
     <div class="alert alert-danger alert-dismissible fade show" role="alert">
         @_errorMessage
         <button type="button" class="btn-close" aria-label="Close" @onclick="() => _errorMessage = null"></button>
+    </div>
+}
+
+@{
+    var activeTripwire = Dsp.GetRecentTripwires()
+        .FirstOrDefault(t => DateTimeOffset.UtcNow - t.Timestamp < TimeSpan.FromSeconds(3));
+}
+@if (activeTripwire is not null)
+{
+    <div class="alert alert-danger" role="alert">
+        <strong>Tripwire:</strong> motion on @activeTripwire.NodeMac &larr; @FormatSrcMac(activeTripwire.SrcMac)
+        ch @activeTripwire.Channel — deviation @activeTripwire.LiveVariance.ToString("F4")
+        (@activeTripwire.Ratio.ToString("F1")&times; floor)
     </div>
 }
 
@@ -277,7 +291,10 @@
                             </select>
                         </div>
                         <div class="col-md-5">
-                            <label class="form-label">Target MACs</label>
+                            <div class="d-flex justify-content-between align-items-center">
+                                <label class="form-label mb-0">Target MACs</label>
+                                <button class="btn btn-sm btn-outline-secondary" type="button" @onclick="SelectTopRankedMacs" title="Rank MACs across all scanned channels by packet count">Select Top Active</button>
+                            </div>
                             <div class="border rounded p-2" style="max-height: 10rem; overflow-y: auto;">
                                 @if (Store.CombinedRfScan.TryGetValue(_lockChannel, out var selectedChannel) && selectedChannel is not null)
                                 {
@@ -428,6 +445,76 @@
                 </circle>
             }
         </svg>
+    </div>
+</div>
+
+<div class="card mb-3">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <span>Detection Coordinator</span>
+        <span>
+            @if (_allBaselinesConverged)
+            {
+                <span class="badge bg-success me-1">System Ready: Room RF Baselines Converged</span>
+            }
+            else
+            {
+                <span class="badge bg-warning text-dark me-1">Learning Room Multipath&hellip; (walk around to speed up convergence)</span>
+            }
+            @if (Coordinator.IsRunning)
+            {
+                <span class="badge bg-success me-1">Running</span>
+                @if (Coordinator.CurrentChannel is int curCh)
+                {
+                    <span class="badge bg-info text-dark me-1">ch @curCh</span>
+                }
+                @if (Coordinator.StartedAt is DateTimeOffset started)
+                {
+                    <span class="badge bg-secondary">@((DateTimeOffset.UtcNow - started).ToString(@"mm\:ss"))</span>
+                }
+            }
+            else
+            {
+                <span class="badge bg-secondary">Idle</span>
+            }
+        </span>
+    </div>
+    <div class="card-body">
+        <div class="row g-2 align-items-end mb-3">
+            <div class="col-md-5">
+                <label class="form-label">Channels (comma-separated)</label>
+                <input class="form-control form-control-sm" @bind="_detectChannels" disabled="@Coordinator.IsRunning" />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label">Dwell (ms)</label>
+                <input type="number" class="form-control form-control-sm" @bind="_detectDwellMs" min="100" max="5000" step="50" disabled="@Coordinator.IsRunning" />
+            </div>
+            <div class="col-md-4">
+                @if (Coordinator.IsRunning)
+                {
+                    <button class="btn btn-danger w-100" type="button" @onclick="StopDetection">Stop Detection</button>
+                }
+                else
+                {
+                    <button class="btn btn-success w-100" type="button" disabled="@(_lockMacs.Count == 0)" title="@(_lockMacs.Count == 0 ? "Select target MACs in the aggregate scan first" : null)" @onclick="StartDetection">Start Detection</button>
+                }
+            </div>
+        </div>
+        @{ var varianceSeries = GetActiveVarianceSeries(); }
+        @if (varianceSeries is not null)
+        {
+            <div class="small text-muted mb-1">
+                Live deviation — @varianceSeries.Value.Key.NodeMac &larr; @FormatSrcMac(varianceSeries.Value.Key.SrcMac)
+                ch @varianceSeries.Value.Key.Channel (floor @varianceSeries.Value.Floor.ToString("F4"))
+            </div>
+            <svg viewBox="0 0 720 120" class="border rounded w-100" preserveAspectRatio="none" style="max-height: 8rem;">
+                <polyline points="@VariancePoints(varianceSeries.Value.Values, varianceSeries.Value.YMax)" fill="none" stroke="#e6194b" stroke-width="1.2" stroke-opacity="0.85" />
+                <line x1="34" y1="@VarianceY(varianceSeries.Value.Floor, varianceSeries.Value.YMax)" x2="716" y2="@VarianceY(varianceSeries.Value.Floor, varianceSeries.Value.YMax)" stroke="#3cb44b" stroke-width="1" stroke-dasharray="4 2" />
+            </svg>
+        }
+        else
+        {
+            <p class="text-muted small mb-0">No variance history yet — start detection or stream CSI to build baselines.</p>
+        }
     </div>
 </div>
 
@@ -609,6 +696,9 @@ else
     private int _lockBw = 20;
     private List<string> _lockMacs = new();
     private int _sweepDwellMs = 250;
+    private string _detectChannels = "1, 6, 11";
+    private int _detectDwellMs = 250;
+    private bool _allBaselinesConverged;
     private bool _accumulateSweep;
     private readonly ConcurrentDictionary<string, byte> _cooldownKeys = new();
     private readonly ConcurrentDictionary<string, NodeConfiguration> _localConfigurations = new();
@@ -637,6 +727,7 @@ else
 
         while (await _timer.WaitForNextTickAsync().ConfigureAwait(false))
         {
+            _allBaselinesConverged = Dsp.Baselines.Any() && Dsp.Baselines.Values.All(b => b.IsConverged);
             await InvokeAsync(StateHasChanged).ConfigureAwait(false);
         }
     }
@@ -962,6 +1053,43 @@ else
             _lockMacs.Clear();
         }
     }
+
+    private void SelectTopRankedMacs()
+    {
+        var ranked = Store.GetTopRankedMacs();
+        if (ranked.Count == 0)
+        {
+            _errorMessage = "No eligible MACs yet — run a sweep first.";
+            return;
+        }
+
+        _lockMacs = ranked
+            .Select(m => m.Mac!)
+            .Where(m => !string.IsNullOrWhiteSpace(m))
+            .ToList();
+        _errorMessage = null;
+    }
+
+    private void StartDetection()
+    {
+        var channels = (_detectChannels ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(s => int.TryParse(s, out var c) ? c : -1)
+            .Where(c => c is >= 1 and <= 13)
+            .Distinct()
+            .ToList();
+
+        if (channels.Count == 0)
+        {
+            _errorMessage = "Enter at least one valid channel (1-13).";
+            return;
+        }
+
+        Coordinator.Start(channels.ToArray(), Math.Clamp(_detectDwellMs, 100, 5000), _lockMacs.ToArray());
+        _errorMessage = null;
+    }
+
+    private void StopDetection() => Coordinator.Stop();
 
     private async Task LockAndStream()
     {
@@ -1462,6 +1590,67 @@ else
         { "#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4", "#42d4f4", "#f032e6", "#bfef45" };
 
     private static string PhaseColor(int index) => PhasePalette[index % PhasePalette.Length];
+
+    private static string FormatSrcMac(ulong mac)
+        => $"{(mac >> 40) & 0xFF:X2}:{(mac >> 32) & 0xFF:X2}:{(mac >> 24) & 0xFF:X2}:{(mac >> 16) & 0xFF:X2}:{(mac >> 8) & 0xFF:X2}:{mac & 0xFF:X2}";
+
+    // Picks the variance series for the coordinator's current channel (or the
+    // first available), plus its baseline floor and a Y scale that keeps both
+    // the floor line and spikes visible.
+    private ((string NodeMac, ulong SrcMac, int Channel) Key, IReadOnlyList<double> Values, double Floor, double YMax)? GetActiveVarianceSeries()
+    {
+        var series = Dsp.GetVarianceSeries();
+        if (series.Count == 0)
+        {
+            return null;
+        }
+
+        var kv = Coordinator.CurrentChannel is int ch
+            ? series.FirstOrDefault(x => x.Key.Channel == ch)
+            : default;
+        if (kv.Value is null || kv.Value.Count == 0)
+        {
+            kv = series.First();
+        }
+
+        double floor = Dsp.Baselines.TryGetValue(kv.Key, out var baseline)
+            ? baseline.PercentileVariance
+            : 0.0;
+        double yMax = Math.Max(kv.Value.Max(), floor * 3.0);
+        if (yMax <= 0.0)
+        {
+            yMax = 1e-6;
+        }
+
+        return (kv.Key, kv.Value, floor, yMax);
+    }
+
+    // Maps sample index -> X and deviation (0..yMax) -> Y inside a 720x120 viewBox.
+    private static string VariancePoints(IReadOnlyList<double> values, double yMax)
+    {
+        const double Left = 34.0, Right = 716.0, Top = 8.0, Bottom = 108.0;
+        if (values.Count == 0 || yMax <= 0.0)
+        {
+            return string.Empty;
+        }
+
+        var sb = new System.Text.StringBuilder(values.Count * 12);
+        double step = values.Count > 1 ? (Right - Left) / (values.Count - 1) : 0.0;
+        for (int i = 0; i < values.Count; i++)
+        {
+            double x = Left + (i * step);
+            double y = Bottom - (Math.Min(values[i], yMax) / yMax) * (Bottom - Top);
+            sb.Append(x.ToString("F1")).Append(',').Append(y.ToString("F1")).Append(' ');
+        }
+
+        return sb.ToString();
+    }
+
+    private static double VarianceY(double value, double yMax)
+    {
+        const double Top = 8.0, Bottom = 108.0;
+        return yMax <= 0.0 ? Bottom : Bottom - (Math.Min(value, yMax) / yMax) * (Bottom - Top);
+    }
 
     // Maps packet index -> X and phase (-pi..+pi) -> Y inside the 720x220 viewBox.
     // Plot area: x in [34,716], y in [12,208] with 0-phase at the y=110 midline.

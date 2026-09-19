@@ -44,4 +44,12 @@ public sealed class CsiAoaOptions
     /// when a RoomBaseline is considered converged. Default is 1.5.
     /// </summary>
     public double ConvergenceVarianceMultiplier { get; set; } = 1.5;
+
+    /// <summary>
+    /// Multiplier applied to a converged baseline's 95th-percentile variance to
+    /// trip the motion/anomaly detector. A frame whose mean squared deviation
+    /// from the baseline mean exceeds floor * multiplier raises a tripwire
+    /// event. Default is 2.5.
+    /// </summary>
+    public double TripwireVarianceMultiplier { get; set; } = 2.5;
 }

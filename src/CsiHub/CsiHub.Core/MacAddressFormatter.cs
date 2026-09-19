@@ -30,6 +30,27 @@ public static class MacAddressFormatter
     }
 
     /// <summary>
+    /// True when the locally-administered bit (0x02 of the first octet) is set,
+    /// which is how phones randomize probe-request source addresses. Operates on
+    /// the canonical string: the second character is the low nibble of octet 0.
+    /// </summary>
+    public static bool IsLocallyAdministered(string? canonicalMac)
+        => canonicalMac is { Length: >= 2 } && "2367ABEF".Contains(canonicalMac[1]);
+
+    /// <summary>
+    /// True when the MAC is multicast (0x01) or locally administered (0x02) -
+    /// i.e. never a real station's globally unique hardware address.
+    /// </summary>
+    public static bool IsMulticastOrLocal(string? canonicalMac)
+        => canonicalMac is { Length: >= 2 } && (HexValue(canonicalMac[1]) & 0x3) != 0;
+
+    private static int HexValue(char c)
+        => c is >= '0' and <= '9' ? c - '0'
+         : c is >= 'A' and <= 'F' ? c - 'A' + 10
+         : c is >= 'a' and <= 'f' ? c - 'a' + 10
+         : 0;
+
+    /// <summary>
     /// Returns an uppercase, colon-free, hyphen-free, whitespace-free MAC string.
     /// Returns <see cref="string.Empty"/> for null or empty input.
     /// </summary>
