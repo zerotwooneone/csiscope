@@ -18,9 +18,6 @@ public sealed class ChannelAnomalySink : IAnomalySink, IAnomalySource
             SingleWriter = false,
         });
 
-    /// <summary>UI/poller consumption side.</summary>
-    public ChannelReader<AnomalyDetected> Reader => _channel.Reader;
-
     public ValueTask PublishAsync(AnomalyDetected anomaly, CancellationToken ct = default)
     {
         _channel.Writer.TryWrite(anomaly);
