@@ -5,132 +5,179 @@
 
 <PageTitle>CsiScope — Sensing Dashboard</PageTitle>
 
-<h1>CsiScope</h1>
-
 @{ var snapshot = Worker.LatestSnapshot; }
 
-@if (snapshot is null)
-{
-    <p><em>Awaiting initial orchestrator snapshot...</em></p>
-}
-else
-{
-    <section>
-        <h2>Campaign Status</h2>
-        <table>
-            <tbody>
-                <tr><th>Mode</th><td>@snapshot.Mode</td></tr>
-                <tr><th>Time in mode</th><td>@((snapshot.TakenAt - snapshot.ModeEnteredAt).ToString(@"mm\:ss"))</td></tr>
-                <tr><th>Locked channel</th><td>@(snapshot.LockedChannel is { } ch ? (int)ch : "—")</td></tr>
-                <tr><th>Primary target</th><td>@(snapshot.PrimaryTarget?.ToString() ?? "—")</td></tr>
-                <tr><th>Snapshot at</th><td>@snapshot.TakenAt.ToString("HH:mm:ss.fff")</td></tr>
-            </tbody>
-        </table>
+<div class="container-fluid py-3">
+    <h1 class="h4 mb-3 font-monospace">CsiScope <small class="text-muted">sensing campaign</small></h1>
 
-        @if (snapshot.RecentEvents.Length > 0)
-        {
-            <h3>Recent transitions</h3>
-            <ul>
-                @foreach (var evt in snapshot.RecentEvents)
-                {
-                    <li><code>@evt</code></li>
-                }
-            </ul>
-        }
-    </section>
+    @if (snapshot is null)
+    {
+        <div class="d-flex align-items-center gap-2 text-secondary">
+            <div class="spinner-border spinner-border-sm" role="status"></div>
+            <span>Awaiting telemetry…</span>
+        </div>
+    }
+    else
+    {
+        @* Row 1 — campaign state + node liveness *@
+        <div class="row g-3 mb-3">
+            <div class="col-md-6">
+                <div class="card h-100">
+                    <div class="card-header py-1 font-monospace">Campaign</div>
+                    <div class="card-body py-2">
+                        <div class="d-flex align-items-center gap-3 flex-wrap">
+                            <span class="badge @ModeBadge(snapshot.Mode) fs-6">@snapshot.Mode</span>
+                            <span>ch <strong>@(snapshot.LockedChannel is { } lc ? (int)lc : "—")</strong></span>
+                            <span>target <code>@(snapshot.PrimaryTarget?.ToString() ?? "—")</code></span>
+                            <span class="text-muted">in mode @((snapshot.TakenAt - snapshot.ModeEnteredAt).ToString(@"mm\:ss"))</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card h-100">
+                    <div class="card-header py-1 font-monospace">Node Liveness (@snapshot.NodeLiveness.Length)</div>
+                    <div class="card-body py-2">
+                        <table class="table table-sm table-borderless mb-0 font-monospace">
+                            <tbody>
+                                @foreach (var n in snapshot.NodeLiveness)
+                                {
+                                    var stale = n.LastSeen is null || snapshot.TakenAt - n.LastSeen.Value > TimeSpan.FromSeconds(10);
+                                    <tr>
+                                        <td><code>@n.Node</code></td>
+                                        <td class="@(stale ? "text-danger fw-bold" : "text-success")">
+                                            @(n.LastSeen is { } seen ? $"{(snapshot.TakenAt - seen).TotalSeconds:F1}s ago" : "never seen")
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
 
-    <section>
-        <h2>Baselines (@snapshot.Baselines.Length)</h2>
-        <table border="1" cellpadding="4">
-            <thead>
-                <tr>
-                    <th>Node</th><th>Source</th><th>Ch</th><th>Fill</th>
-                    <th>Mean</th><th>Floor</th><th>Frames</th><th>Converged</th>
-                </tr>
-            </thead>
-            <tbody>
-                @foreach (var b in snapshot.Baselines)
-                {
-                    <tr>
-                        <td>@b.Link.Node</td>
-                        <td>@b.Link.Source</td>
-                        <td>@((int)b.Link.Channel)</td>
-                        <td>@b.FillFraction.ToString("P0")</td>
-                        <td>@b.Mean.ToString("F2")</td>
-                        <td>@b.CurrentFloor.Value.ToString("F4")</td>
-                        <td>@b.TotalFrames</td>
-                        <td>@(b.IsConverged ? "✓" : "")</td>
-                    </tr>
-                }
-            </tbody>
-        </table>
-    </section>
+        @* Row 2 — environment map + campaign history *@
+        <div class="row g-3 mb-3">
+            <div class="col-md-6">
+                <div class="card h-100">
+                    <div class="card-header py-1 font-monospace">Channel Activity</div>
+                    <div class="card-body py-2">
+                        @{ var maxActivity = GetMaxActivity(snapshot); }
+                        <table class="table table-sm mb-0 font-monospace">
+                            <thead><tr><th>Ch</th><th>Activity</th><th>Top MAC</th><th style="width:40%"></th></tr></thead>
+                            <tbody>
+                                @foreach (var c in snapshot.ChannelScores)
+                                {
+                                    var pct = maxActivity > 0 ? c.Activity.Value / maxActivity * 100 : 0;
+                                    var isLocked = snapshot.LockedChannel is { } l && l == c.Channel;
+                                    <tr>
+                                        <td>
+                                            @((int)c.Channel)
+                                            @if (isLocked) { <span class="badge bg-success">lock</span> }
+                                        </td>
+                                        <td>@c.Activity.Value.ToString("F1")</td>
+                                        <td><code>@c.TopMac</code></td>
+                                        <td>
+                                            <div style="background:#212529; height:10px;">
+                                                <div style="width:@pct.ToString("F0")%; height:10px; background:#0d6efd;"></div>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card h-100">
+                    <div class="card-header py-1 font-monospace">Campaign History</div>
+                    <div class="card-body py-2">
+                        @if (snapshot.RecentEvents.Length == 0)
+                        {
+                            <span class="text-muted">No transitions since last snapshot.</span>
+                        }
+                        else
+                        {
+                            <ul class="list-unstyled mb-0 font-monospace small">
+                                @foreach (var evt in snapshot.RecentEvents)
+                                {
+                                    <li>@DescribeEvent(evt)</li>
+                                }
+                            </ul>
+                        }
+                    </div>
+                </div>
+            </div>
+        </div>
 
-    <section>
-        <h2>Channel Activity</h2>
-        <table border="1" cellpadding="4">
-            <thead>
-                <tr><th>Ch</th><th>Activity</th><th>Top MAC</th><th>Last frame</th></tr>
-            </thead>
-            <tbody>
-                @foreach (var c in snapshot.ChannelScores)
-                {
-                    <tr>
-                        <td>@((int)c.Channel)</td>
-                        <td>@c.Activity.Value.ToString("F1") pps</td>
-                        <td>@c.TopMac</td>
-                        <td>@(c.LastFrameAt == DateTimeOffset.MinValue ? "—" : c.LastFrameAt.ToString("HH:mm:ss"))</td>
-                    </tr>
-                }
-            </tbody>
-        </table>
-    </section>
-
-    <section>
-        <h2>Node Roster (@snapshot.NodeLiveness.Length)</h2>
-        <table border="1" cellpadding="4">
-            <thead>
-                <tr><th>Node</th><th>Last seen</th><th>Age</th></tr>
-            </thead>
-            <tbody>
-                @foreach (var n in snapshot.NodeLiveness)
-                {
-                    <tr>
-                        <td>@n.Node</td>
-                        <td>@(n.LastSeen?.ToString("HH:mm:ss") ?? "never")</td>
-                        <td>@(n.LastSeen is { } seen ? (snapshot.TakenAt - seen).ToString(@"ss\.f") + "s" : "—")</td>
-                    </tr>
-                }
-            </tbody>
-        </table>
-    </section>
-}
-
-<section>
-    <h2>Tripwire Feed (@_anomalies.Count)</h2>
-    <table border="1" cellpadding="4">
-        <thead>
-            <tr><th>At</th><th>Node</th><th>Source</th><th>Ch</th><th>Deviation</th></tr>
-        </thead>
-        <tbody>
-            @foreach (var a in _anomalies)
-            {
-                <tr>
-                    <td>@a.At.ToString("HH:mm:ss.fff")</td>
-                    <td>@a.Link.Node</td>
-                    <td>@a.Link.Source</td>
-                    <td>@((int)a.Link.Channel)</td>
-                    <td>@a.DeviationRatio.Value.ToString("F2")×</td>
-                </tr>
-            }
-        </tbody>
-    </table>
-</section>
+        @* Row 3 — baselines + tripwire feed *@
+        <div class="row g-3">
+            <div class="col-md-7">
+                <div class="card h-100">
+                    <div class="card-header py-1 font-monospace">Link Baselines (@snapshot.Baselines.Length)</div>
+                    <div class="card-body py-2">
+                        <table class="table table-sm mb-0 font-monospace">
+                            <thead>
+                                <tr><th>Node</th><th>Source</th><th>Ch</th><th style="width:25%">Fill</th><th>Mean</th><th>Floor</th><th></th></tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var b in snapshot.Baselines)
+                                {
+                                    <tr>
+                                        <td><code>@b.Link.Node</code></td>
+                                        <td><code>@b.Link.Source</code></td>
+                                        <td>@((int)b.Link.Channel)</td>
+                                        <td>
+                                            <div class="progress" style="height:10px;">
+                                                <div class="progress-bar @(b.IsConverged ? "bg-success" : "bg-info")"
+                                                     style="width:@(b.FillFraction * 100).ToString("F0")%"></div>
+                                            </div>
+                                        </td>
+                                        <td>@b.Mean.ToString("F2")</td>
+                                        <td>@b.CurrentFloor.Value.ToString("F4")</td>
+                                        <td>
+                                            @if (b.IsConverged) { <span class="badge bg-success">locked</span> }
+                                            else { <span class="badge bg-secondary">filling</span> }
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-5">
+                <div class="card h-100">
+                    <div class="card-header py-1 font-monospace">Tripwire Feed (@_recentAnomalies.Count)</div>
+                    <div class="card-body py-2">
+                        <table class="table table-sm mb-0 font-monospace">
+                            <thead><tr><th>At</th><th>Link</th><th>Ratio</th><th>Amp</th><th>Floor</th></tr></thead>
+                            <tbody>
+                                @foreach (var a in _recentAnomalies)
+                                {
+                                    <tr>
+                                        <td>@a.At.ToString("HH:mm:ss.fff")</td>
+                                        <td><code>@a.Link.Node → @a.Link.Source</code></td>
+                                        <td><span class="badge bg-danger">@a.DeviationRatio.Value.ToString("F1")×</span></td>
+                                        <td>@a.RawAmplitude.ToString("F2")</td>
+                                        <td>@a.CurrentFloor.ToString("F4")</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+</div>
 
 @code {
     private const int MaxAnomalies = 50;
 
-    private readonly List<AnomalyDetected> _anomalies = new();
+    private readonly List<AnomalyDetected> _recentAnomalies = new();
     private PeriodicTimer? _timer;
     private CancellationTokenSource? _cts;
     private Task? _anomalyLoop;
@@ -142,6 +189,34 @@ else
         _ = PollLoop();
         _anomalyLoop = ConsumeAnomaliesAsync(_cts.Token);
     }
+
+    private static string ModeBadge(CampaignMode mode) => mode switch
+    {
+        CampaignMode.Surveying => "bg-warning text-dark",
+        CampaignMode.Acquiring => "bg-info text-dark",
+        CampaignMode.Detecting => "bg-success",
+        _ => "bg-secondary",
+    };
+
+    private static double GetMaxActivity(SensingSnapshot snapshot)
+    {
+        var max = 0.0;
+        foreach (var c in snapshot.ChannelScores)
+        {
+            if (c.Activity.Value > max) { max = c.Activity.Value; }
+        }
+
+        return max;
+    }
+
+    private static MarkupString DescribeEvent(object evt) => evt switch
+    {
+        ChannelLockAcquired e => new MarkupString(
+            $"<span class='text-info'>LOCK</span> ch {(int)e.Channel} → <code>{e.PrimaryTarget}</code> <span class='text-muted'>{e.At:HH:mm:ss}</span>"),
+        ConfidenceDegraded e => new MarkupString(
+            $"<span class='text-warning'>DROP</span> ch {(int)e.Channel} — {e.Reason} <span class='text-muted'>(conf {e.Score.Value:F2}) {e.At:HH:mm:ss}</span>"),
+        _ => new MarkupString($"<code>{evt}</code>"),
+    };
 
     private async Task PollLoop()
     {
@@ -168,10 +243,10 @@ else
                 // continuation runs on a threadpool thread.
                 await InvokeAsync(() =>
                 {
-                    _anomalies.Insert(0, anomaly);
-                    if (_anomalies.Count > MaxAnomalies)
+                    _recentAnomalies.Insert(0, anomaly);
+                    if (_recentAnomalies.Count > MaxAnomalies)
                     {
-                        _anomalies.RemoveAt(_anomalies.Count - 1);
+                        _recentAnomalies.RemoveAt(_recentAnomalies.Count - 1);
                     }
 
                     StateHasChanged();

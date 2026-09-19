@@ -83,7 +83,8 @@ public sealed class LinkBaseline
                 && sample.Timestamp - _lastTripwireAt > _tunables.TripwireCooldown)
             {
                 _lastTripwireAt = sample.Timestamp;
-                anomaly = new AnomalyDetected(Link, new DeviationRatio(ratio), sample.Timestamp);
+                anomaly = new AnomalyDetected(
+                    Link, new DeviationRatio(ratio), sample.Amplitude, _varianceFloor, sample.Timestamp);
             }
         }
 
