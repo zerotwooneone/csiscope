@@ -316,6 +316,7 @@ public sealed class SensingOrchestrator
         return new SensingSnapshot(
             now,
             Campaign.Mode,
+            Campaign.ModeEnteredAt,
             Campaign.LockedChannel,
             Campaign.PrimaryTarget,
             baselines.MoveToImmutable(),

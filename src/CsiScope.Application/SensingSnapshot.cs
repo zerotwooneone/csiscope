@@ -13,6 +13,7 @@ namespace CsiScope.Application;
 public sealed record SensingSnapshot(
     DateTimeOffset TakenAt,
     CampaignMode Mode,
+    DateTimeOffset ModeEnteredAt,
     WifiChannel? LockedChannel,
     MacAddress? PrimaryTarget,
     ImmutableArray<BaselineReadModel> Baselines,

@@ -1,0 +1,198 @@
+@page "/"
+@inject SensingHostWorker Worker
+@inject IAnomalySource AnomalySource
+@implements IAsyncDisposable
+
+<PageTitle>CsiScope — Sensing Dashboard</PageTitle>
+
+<h1>CsiScope</h1>
+
+@{ var snapshot = Worker.LatestSnapshot; }
+
+@if (snapshot is null)
+{
+    <p><em>Awaiting initial orchestrator snapshot...</em></p>
+}
+else
+{
+    <section>
+        <h2>Campaign Status</h2>
+        <table>
+            <tbody>
+                <tr><th>Mode</th><td>@snapshot.Mode</td></tr>
+                <tr><th>Time in mode</th><td>@((snapshot.TakenAt - snapshot.ModeEnteredAt).ToString(@"mm\:ss"))</td></tr>
+                <tr><th>Locked channel</th><td>@(snapshot.LockedChannel is { } ch ? (int)ch : "—")</td></tr>
+                <tr><th>Primary target</th><td>@(snapshot.PrimaryTarget?.ToString() ?? "—")</td></tr>
+                <tr><th>Snapshot at</th><td>@snapshot.TakenAt.ToString("HH:mm:ss.fff")</td></tr>
+            </tbody>
+        </table>
+
+        @if (snapshot.RecentEvents.Length > 0)
+        {
+            <h3>Recent transitions</h3>
+            <ul>
+                @foreach (var evt in snapshot.RecentEvents)
+                {
+                    <li><code>@evt</code></li>
+                }
+            </ul>
+        }
+    </section>
+
+    <section>
+        <h2>Baselines (@snapshot.Baselines.Length)</h2>
+        <table border="1" cellpadding="4">
+            <thead>
+                <tr>
+                    <th>Node</th><th>Source</th><th>Ch</th><th>Fill</th>
+                    <th>Mean</th><th>Floor</th><th>Frames</th><th>Converged</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var b in snapshot.Baselines)
+                {
+                    <tr>
+                        <td>@b.Link.Node</td>
+                        <td>@b.Link.Source</td>
+                        <td>@((int)b.Link.Channel)</td>
+                        <td>@b.FillFraction.ToString("P0")</td>
+                        <td>@b.Mean.ToString("F2")</td>
+                        <td>@b.CurrentFloor.Value.ToString("F4")</td>
+                        <td>@b.TotalFrames</td>
+                        <td>@(b.IsConverged ? "✓" : "")</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </section>
+
+    <section>
+        <h2>Channel Activity</h2>
+        <table border="1" cellpadding="4">
+            <thead>
+                <tr><th>Ch</th><th>Activity</th><th>Top MAC</th><th>Last frame</th></tr>
+            </thead>
+            <tbody>
+                @foreach (var c in snapshot.ChannelScores)
+                {
+                    <tr>
+                        <td>@((int)c.Channel)</td>
+                        <td>@c.Activity.Value.ToString("F1") pps</td>
+                        <td>@c.TopMac</td>
+                        <td>@(c.LastFrameAt == DateTimeOffset.MinValue ? "—" : c.LastFrameAt.ToString("HH:mm:ss"))</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </section>
+
+    <section>
+        <h2>Node Roster (@snapshot.NodeLiveness.Length)</h2>
+        <table border="1" cellpadding="4">
+            <thead>
+                <tr><th>Node</th><th>Last seen</th><th>Age</th></tr>
+            </thead>
+            <tbody>
+                @foreach (var n in snapshot.NodeLiveness)
+                {
+                    <tr>
+                        <td>@n.Node</td>
+                        <td>@(n.LastSeen?.ToString("HH:mm:ss") ?? "never")</td>
+                        <td>@(n.LastSeen is { } seen ? (snapshot.TakenAt - seen).ToString(@"ss\.f") + "s" : "—")</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </section>
+}
+
+<section>
+    <h2>Tripwire Feed (@_anomalies.Count)</h2>
+    <table border="1" cellpadding="4">
+        <thead>
+            <tr><th>At</th><th>Node</th><th>Source</th><th>Ch</th><th>Deviation</th></tr>
+        </thead>
+        <tbody>
+            @foreach (var a in _anomalies)
+            {
+                <tr>
+                    <td>@a.At.ToString("HH:mm:ss.fff")</td>
+                    <td>@a.Link.Node</td>
+                    <td>@a.Link.Source</td>
+                    <td>@((int)a.Link.Channel)</td>
+                    <td>@a.DeviationRatio.Value.ToString("F2")×</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+</section>
+
+@code {
+    private const int MaxAnomalies = 50;
+
+    private readonly List<AnomalyDetected> _anomalies = new();
+    private PeriodicTimer? _timer;
+    private CancellationTokenSource? _cts;
+    private Task? _anomalyLoop;
+
+    protected override void OnInitialized()
+    {
+        _cts = new CancellationTokenSource();
+        _timer = new PeriodicTimer(TimeSpan.FromMilliseconds(333));
+        _ = PollLoop();
+        _anomalyLoop = ConsumeAnomaliesAsync(_cts.Token);
+    }
+
+    private async Task PollLoop()
+    {
+        try
+        {
+            while (await _timer!.WaitForNextTickAsync(_cts!.Token).ConfigureAwait(false))
+            {
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException) when (_cts!.IsCancellationRequested)
+        {
+            // component disposed
+        }
+    }
+
+    private async Task ConsumeAnomaliesAsync(CancellationToken ct)
+    {
+        try
+        {
+            await foreach (var anomaly in AnomalySource.ReadAllAsync(ct).ConfigureAwait(false))
+            {
+                // Marshal onto the renderer's sync context — the channel
+                // continuation runs on a threadpool thread.
+                await InvokeAsync(() =>
+                {
+                    _anomalies.Insert(0, anomaly);
+                    if (_anomalies.Count > MaxAnomalies)
+                    {
+                        _anomalies.RemoveAt(_anomalies.Count - 1);
+                    }
+
+                    StateHasChanged();
+                });
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // component disposed
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _cts?.Cancel();
+        _timer?.Dispose();
+        if (_anomalyLoop is not null)
+        {
+            try { await _anomalyLoop; } catch (OperationCanceledException) { }
+        }
+
+        _cts?.Dispose();
+    }
+}

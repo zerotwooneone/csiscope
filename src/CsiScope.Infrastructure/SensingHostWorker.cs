@@ -36,6 +36,8 @@ public sealed class SensingHostWorker : BackgroundService
     private readonly Func<string, CancellationToken, ValueTask<Stream>> _openStream;
     private readonly TimeSpan _tickInterval;
     private readonly TimeSpan _reconnectDelay;
+    private readonly TimeSpan _ackTimeout;
+    private readonly int _maxAttempts;
     private readonly ILogger<SensingHostWorker>? _logger;
     private readonly Channel<IngressItem> _ingress;
     private SensingSnapshot? _latestSnapshot;
@@ -55,7 +57,9 @@ public sealed class SensingHostWorker : BackgroundService
         Func<string, CancellationToken, ValueTask<Stream>> openStream,
         TimeSpan? tickInterval = null,
         TimeSpan? reconnectDelay = null,
-        ILogger<SensingHostWorker>? logger = null)
+        ILogger<SensingHostWorker>? logger = null,
+        TimeSpan? ackTimeout = null,
+        int maxAttempts = 2)
     {
         _orchestrator = orchestrator;
         _radio = radio;
@@ -64,6 +68,8 @@ public sealed class SensingHostWorker : BackgroundService
         _openStream = openStream;
         _tickInterval = tickInterval ?? TimeSpan.FromMilliseconds(100);
         _reconnectDelay = reconnectDelay ?? TimeSpan.FromSeconds(2);
+        _ackTimeout = ackTimeout ?? TimeSpan.FromMilliseconds(1000);
+        _maxAttempts = maxAttempts;
         _logger = logger;
         _ingress = Channel.CreateBounded<IngressItem>(new BoundedChannelOptions(IngressCapacity)
         {
@@ -148,15 +154,31 @@ public sealed class SensingHostWorker : BackgroundService
             {
                 stream = await _openStream(portName, ct);
 
+                // Some drivers ignore the CancellationToken while ReadAsync is
+                // blocked — disposing the stream closes the handle and forces
+                // the read to return, so shutdown can never zombie-hold a port.
+                using var cancelReg = ct.Register(() => stream.Dispose());
+
                 // Egress for this port lives exactly as long as the connection.
                 var s = stream;
-                nodeAdapter = new NodeSerialAdapter((bytes, token) => s.WriteAsync(bytes, token), _time);
+                nodeAdapter = new NodeSerialAdapter(
+                    (bytes, token) => s.WriteAsync(bytes, token), _time, _ackTimeout, _maxAttempts);
                 _radio.RegisterNode(portName, nodeAdapter);
 
                 await PumpStreamAsync(stream, portName, ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
+                break;
+            }
+            catch (ObjectDisposedException) when (ct.IsCancellationRequested)
+            {
+                // Stream disposed by the cancel registration — clean shutdown.
+                break;
+            }
+            catch (IOException) when (ct.IsCancellationRequested)
+            {
+                // Same — the port close surfaced as an IO failure mid-read.
                 break;
             }
             catch (Exception ex)
