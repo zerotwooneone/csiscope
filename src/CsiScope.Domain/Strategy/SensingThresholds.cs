@@ -25,6 +25,19 @@ public sealed record SensingThresholds
     /// <summary>Maximum acquisition dwell before abandoning the channel.</summary>
     public TimeSpan AcquisitionTimeout { get; init; } = TimeSpan.FromSeconds(90);
 
+    /// <summary>
+    /// Target-quiet window during Acquiring before the campaign goes listening
+    /// for alternative channels (without releasing the lock). Progress resets it.
+    /// </summary>
+    public TimeSpan StallTimeout { get; init; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Absolute ceiling on an acquisition dwell — even a still-progressing
+    /// baseline is abandoned past this so a non-converging target can't pin the
+    /// campaign forever.
+    /// </summary>
+    public TimeSpan MaxAcquisitionDwell { get; init; } = TimeSpan.FromSeconds(240);
+
     /// <summary>Composite confidence below this abandons the lock entirely.</summary>
     public double AbandonThreshold { get; init; } = 0.15;
 

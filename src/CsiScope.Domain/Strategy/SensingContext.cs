@@ -30,6 +30,12 @@ public sealed record SensingContext
     /// <summary>Every rostered node has at least one converged link on the locked channel.</summary>
     public bool AllNodesConverged { get; init; }
 
+    /// <summary>Rolling (EMA) primary-target packet rate — the progress signal, not a cumulative count.</summary>
+    public double TargetPps { get; init; }
+
+    /// <summary>Time since the acquisition last made progress (target frame or explore-return).</summary>
+    public TimeSpan StalledFor { get; init; }
+
     /// <summary>Survey-ranked acquisition candidates, best activity first.</summary>
     public ImmutableArray<ChannelCandidate> Candidates { get; init; } = [];
 

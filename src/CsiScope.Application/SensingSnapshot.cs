@@ -19,7 +19,13 @@ public sealed record SensingSnapshot(
     ImmutableArray<BaselineReadModel> Baselines,
     ImmutableArray<ChannelActivityReadModel> ChannelScores,
     ImmutableArray<NodeLivenessReadModel> NodeLiveness,
-    ImmutableArray<object> RecentEvents);
+    ImmutableArray<object> RecentEvents,
+    ConfidenceScore Confidence,
+    double TargetPps,
+    int ConvergedNodes,
+    int ExpectedNodes,
+    TimeSpan StalledFor,
+    DateTimeOffset? LastAuditAt);
 
 /// <summary>Per-link baseline health for the diagnostics table.</summary>
 public readonly record struct BaselineReadModel(

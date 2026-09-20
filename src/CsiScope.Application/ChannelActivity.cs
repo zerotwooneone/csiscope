@@ -69,7 +69,13 @@ internal sealed class ChannelActivity
 
     public double Pps(DateTimeOffset now)
     {
-        double seconds = (now - WindowStartedAt).TotalSeconds;
+        // Rate over the span frames actually arrived in (hop → last frame), not
+        // now − WindowStartedAt: that keeps growing after the dwell ends, so a
+        // channel swept earlier decays toward zero and the last-hopped channel
+        // always wins regardless of real activity. When nothing arrived yet,
+        // fall back to now so a fresh window still reports 0 rather than a spike.
+        var windowEnd = LastFrameAt > WindowStartedAt ? LastFrameAt : now;
+        double seconds = (windowEnd - WindowStartedAt).TotalSeconds;
         return seconds > 0 ? Frames / seconds : 0.0;
     }
 
@@ -78,6 +84,7 @@ internal sealed class ChannelActivity
     {
         Frames = 0;
         WindowStartedAt = now;
+        LastFrameAt = DateTimeOffset.MinValue;
         _macCounts.Clear();
         _topCount = 0;
     }

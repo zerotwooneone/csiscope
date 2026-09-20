@@ -95,9 +95,9 @@
     }
     else
     {
-        @* Row 1 — campaign state + node liveness *@
+        @* Row 1 — campaign state + tracking progress + node liveness *@
         <div class="row g-3 mb-3">
-            <div class="col-md-6">
+            <div class="col-md-4">
                 <div class="card h-100">
                     <div class="card-header py-1 font-monospace">Campaign</div>
                     <div class="card-body py-2">
@@ -110,7 +110,33 @@
                     </div>
                 </div>
             </div>
-            <div class="col-md-6">
+            <div class="col-md-4">
+                <div class="card h-100">
+                    <div class="card-header py-1 font-monospace">Tracking</div>
+                    <div class="card-body py-2 font-monospace">
+                        <div class="d-flex align-items-center gap-2 mb-1">
+                            <span class="text-muted">confidence</span>
+                            <div class="progress flex-grow-1" style="height:10px;">
+                                <div class="progress-bar @ConfidenceBar(snapshot.Confidence.Value)"
+                                     style="width:@((snapshot.Confidence.Value * 100).ToString("F0"))%"></div>
+                            </div>
+                            <span>@snapshot.Confidence.Value.ToString("F2")</span>
+                        </div>
+                        <div class="small text-muted mb-2">
+                            fill @snapshot.Confidence.Fill.ToString("F2") · stab @snapshot.Confidence.Stability.ToString("F2") · pps @snapshot.Confidence.TargetPps.ToString("F2") · age @snapshot.Confidence.Age.ToString("F2")
+                        </div>
+                        <div class="d-flex justify-content-between small">
+                            <span>target <strong>@snapshot.TargetPps.ToString("F1")</strong> pps</span>
+                            <span>converged <strong>@snapshot.ConvergedNodes/@snapshot.ExpectedNodes</strong></span>
+                        </div>
+                        <div class="d-flex justify-content-between small text-muted">
+                            <span>stalled @snapshot.StalledFor.TotalSeconds.ToString("F0")s</span>
+                            <span>audit @(snapshot.LastAuditAt is { } la ? $"{(snapshot.TakenAt - la).TotalSeconds:F0}s ago" : "—")</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
                 <div class="card h-100">
                     <div class="card-header py-1 font-monospace">Node Liveness (@snapshot.NodeLiveness.Length)</div>
                     <div class="card-body py-2">
@@ -391,6 +417,13 @@
 
         return max;
     }
+
+    private static string ConfidenceBar(double score) => score switch
+    {
+        >= 0.5 => "bg-success",
+        >= 0.15 => "bg-warning",
+        _ => "bg-danger",
+    };
 
     private static MarkupString DescribeEvent(object evt) => evt switch
     {

@@ -36,13 +36,22 @@ public static class SensingPolicy
             }
         }
 
+        // Filter for the WINNING channel's own top MAC — ctx.MacFilter is the
+        // global top set across all channels, so using it can lock channel A
+        // while targeting a MAC that only transmits on channel B (dead air).
         return best is { } b
-            ? new SensingDecision.BeginAcquisition(b.Channel, ctx.MacFilter)
+            ? new SensingDecision.BeginAcquisition(
+                b.Channel,
+                b.TopMac == default ? ctx.MacFilter : [b.TopMac])
             : new SensingDecision.Hold();
     }
 
-    // Acquiring: converge -> Detecting. Dead air past the dead-channel window
-    // -> fast skip back to survey. Live but unconverged past the cap -> give up.
+    // Acquiring: converge -> Detecting. Dead air -> fast skip back to survey.
+    // The dwell is progress-adaptive: while the target keeps producing frames
+    // the baseline is still refining, so hold. When the target stalls (quiet but
+    // the channel is alive), go listen for alternatives WITHOUT releasing the
+    // lock — the audit returns to the locked channel. Give up only when a stall
+    // outlasts the cap, or the absolute dwell ceiling is hit.
     private static SensingDecision DecideAcquiring(SensingContext ctx, SensingThresholds t)
     {
         if (ctx.AllNodesConverged)
@@ -57,9 +66,28 @@ public static class SensingPolicy
             return new SensingDecision.ResumeSurveying(SurveyReason.DeadAir);
         }
 
-        if (dwell > t.AcquisitionTimeout)
+        // Absolute ceiling — even a "progressing" acquisition can't dwell forever.
+        if (dwell > t.MaxAcquisitionDwell)
         {
             return new SensingDecision.ResumeSurveying(SurveyReason.AcquisitionTimeout);
+        }
+
+        bool stalled = ctx.StalledFor > t.StallTimeout;
+        if (stalled)
+        {
+            // Past the normal cap AND still stalled — the target isn't coming back.
+            if (dwell > t.AcquisitionTimeout)
+            {
+                return new SensingDecision.ResumeSurveying(SurveyReason.AcquisitionTimeout);
+            }
+
+            // Stalled but within budget: spend the dwell listening for
+            // alternatives, then return to the lock and give it another window.
+            var plan = BuildAuditPlan(ctx, t);
+            if (!plan.Channels.IsEmpty)
+            {
+                return new SensingDecision.AuditChannels(plan, ctx.LockedChannel!.Value);
+            }
         }
 
         return new SensingDecision.Hold();

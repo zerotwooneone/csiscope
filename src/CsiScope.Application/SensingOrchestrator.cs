@@ -34,6 +34,10 @@ public sealed class SensingOrchestrator
     // A node silent this long is unregistered so it can't stall Acquiring.
     private static readonly TimeSpan NodeLivenessTimeout = TimeSpan.FromSeconds(10);
 
+    // EMA weight for the rolling target-PPS progress metric (~5-eval horizon at
+    // the 10 Hz tick, so a single burst or gap doesn't whipsaw the signal).
+    private const double TargetPpsAlpha = 0.2;
+
     private readonly IRadioCommandPort _radio;
     private readonly IAnomalySink _anomalySink;
     private readonly SensingThresholds _thresholds;
@@ -63,6 +67,14 @@ public sealed class SensingOrchestrator
     private long _lastTargetFrames;
     private long _lastChannelFrames;
     private DateTimeOffset _lastEvalAt = DateTimeOffset.MinValue;
+
+    // Progress tracking for the adaptive acquisition duty cycle. The stall
+    // clock anchors at the most recent of {target frame, explore-return,
+    // acquisition start}; the EMA smooths the per-eval target rate for display.
+    private double _targetPpsEma;
+    private DateTimeOffset _exploreReturnedAt = DateTimeOffset.MinValue;
+    private ConfidenceScore _lastConfidence = ConfidenceScore.Zero;
+    private TimeSpan _lastStalledFor;
 
     public SensingOrchestrator(
         IRadioCommandPort radio,
@@ -342,6 +354,24 @@ public sealed class SensingOrchestrator
                 node, _nodeLastSeen.TryGetValue(node, out var seen) ? seen : null));
         }
 
+        // Converged-node count for the acquisition progress readout — an
+        // expected node counts once it has a converged link on the locked channel.
+        var convergedNodes = 0;
+        if (Campaign.LockedChannel is { } lockedCh)
+        {
+            foreach (var node in _expectedNodes)
+            {
+                foreach (var kv in _baselines)
+                {
+                    if (kv.Key.Node == node && kv.Key.Channel == lockedCh && kv.Value.IsConverged)
+                    {
+                        convergedNodes++;
+                        break;
+                    }
+                }
+            }
+        }
+
         return new SensingSnapshot(
             now,
             Campaign.Mode,
@@ -351,7 +381,13 @@ public sealed class SensingOrchestrator
             baselines.MoveToImmutable(),
             channels.MoveToImmutable(),
             nodes.MoveToImmutable(),
-            Campaign.DrainEvents().ToImmutableArray());
+            Campaign.DrainEvents().ToImmutableArray(),
+            _lastConfidence,
+            _targetPpsEma,
+            convergedNodes,
+            _expectedNodes.Count,
+            _lastStalledFor,
+            Campaign.LastAuditAt);
     }
 
     // ---- Hot-path helpers ----
@@ -376,6 +412,7 @@ public sealed class SensingOrchestrator
         var targetBaselines = new List<LinkBaseline>();
         long targetFrames = 0, channelFrames = 0;
         DateTimeOffset? lastFrame = null;
+        DateTimeOffset targetLastFrame = DateTimeOffset.MinValue;
 
         foreach (var kv in _baselines)
         {
@@ -395,6 +432,10 @@ public sealed class SensingOrchestrator
             {
                 targetBaselines.Add(baseline);
                 targetFrames += baseline.TotalFrames;
+                if (baseline.LastFrameAt > targetLastFrame)
+                {
+                    targetLastFrame = baseline.LastFrameAt;
+                }
             }
         }
 
@@ -410,18 +451,43 @@ public sealed class SensingOrchestrator
         _lastChannelFrames = channelFrames;
         _lastEvalAt = now;
 
+        // Rolling target rate (EMA) — the progress signal is a count-per-time,
+        // not the ever-increasing TotalFrames. Smoothed so a single burst or
+        // gap doesn't whipsaw the display or the stall detector.
+        _targetPpsEma += TargetPpsAlpha * (observedPps - _targetPpsEma);
+
+        // Stall clock anchors at the most recent of {target frame, explore
+        // return, acquisition start} — so returning from an explore grants a
+        // fresh window before the next stall fires.
+        var progressAnchor = targetLastFrame;
+        if (_exploreReturnedAt > progressAnchor)
+        {
+            progressAnchor = _exploreReturnedAt;
+        }
+        if (Campaign.ModeEnteredAt > progressAnchor)
+        {
+            progressAnchor = Campaign.ModeEnteredAt;
+        }
+        var stalledFor = now - progressAnchor;
+
+        var confidence = ConfidenceEvaluator.EvaluateConfidence(
+            targetBaselines, observedPps, _thresholds.ExpectedTargetPps, _thresholds.StaleAfter, now);
+        _lastConfidence = confidence;
+        _lastStalledFor = stalledFor;
+
         return new SensingContext
         {
             Mode = Campaign.Mode,
             Now = now,
             ModeEnteredAt = Campaign.ModeEnteredAt,
             LockedChannel = locked,
-            Confidence = ConfidenceEvaluator.EvaluateConfidence(
-                targetBaselines, observedPps, _thresholds.ExpectedTargetPps, _thresholds.StaleAfter, now),
+            Confidence = confidence,
             Liveness = locked is { } lc
                 ? ConfidenceEvaluator.EvaluateLiveness(lc, channelDelta, lastFrame)
                 : null,
             AllNodesConverged = AllNodesConverged(locked),
+            TargetPps = _targetPpsEma,
+            StalledFor = stalledFor,
             Candidates = BuildCandidates(now),
             MacFilter = Campaign.MacFilter.Length > 0 ? Campaign.MacFilter : TopMacs(MaxFilterMacs),
             LastAuditAt = Campaign.LastAuditAt,
@@ -490,6 +556,8 @@ public sealed class SensingOrchestrator
             case SensingDecision.BeginAcquisition b:
                 // Fresh baselines for the new lock — pre-lock frames are stale.
                 ResetBaselinesOnChannel(b.Channel);
+                _targetPpsEma = 0;
+                _exploreReturnedAt = DateTimeOffset.MinValue;
                 HopTo(b.Channel, now, b.MacFilter);
                 break;
 
@@ -565,6 +633,11 @@ public sealed class SensingOrchestrator
         {
             _auditReturnTo = null;
             HopTo(returnTo, now, Campaign.MacFilter);
+            // Returning from a mid-acquisition explore resets the stall clock.
+            if (Campaign.Mode == CampaignMode.Acquiring)
+            {
+                _exploreReturnedAt = now;
+            }
         }
     }
 
@@ -586,18 +659,24 @@ public sealed class SensingOrchestrator
         _ = _radio.BroadcastSetRfAsync(channel, macFilter);
     }
 
+    // The 2.4 GHz band the firmware scans (RfManager._channels). Sweeping only
+    // {1,6,11} + already-seen channels can never discover a target on an
+    // unexplored channel — _activity is empty on a cold start, so the plan
+    // would collapse to {1,6,11} forever.
+    private static readonly ImmutableArray<WifiChannel> SurveyBand =
+        ImmutableArray.CreateRange(Enumerable.Range(1, 13).Select(i => new WifiChannel(i)));
+
     private ScanPlan BuildSurveyPlan()
     {
-        var channels = new List<WifiChannel>();
+        var channels = new List<WifiChannel>(SurveyBand.Length);
+        // Re-confirm the busiest channels first, then cover the rest of the band.
         foreach (var kv in _activity.OrderByDescending(kv => kv.Value.Frames))
         {
             channels.Add(kv.Key);
         }
 
-        // Always include the non-overlapping standards so a quiet map still sweeps.
-        foreach (var standard in new[] { 1, 6, 11 })
+        foreach (var channel in SurveyBand)
         {
-            var channel = new WifiChannel(standard);
             if (!channels.Contains(channel))
             {
                 channels.Add(channel);
