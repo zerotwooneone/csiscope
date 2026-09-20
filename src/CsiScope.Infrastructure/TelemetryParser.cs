@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Text.Json;
 using CsiScope.Domain.Model;
 
@@ -9,6 +10,7 @@ public enum TelemetryKind : byte
     Ack,
     Config,
     Heartbeat,
+    RfScan,
 }
 
 /// <summary>Decoded <c>{"type":"ack"}</c> frame — seq matches the outbound command; reason explains NACKs.</summary>
@@ -25,6 +27,7 @@ public readonly record struct ParsedTelemetry
     public AmplitudeSample Sample { get; init; }
     public CommandAck Ack { get; init; }
     public MacAddress AnnouncedMac { get; init; }
+    public RfScanReport Scan { get; init; }
 }
 
 /// <summary>
@@ -52,6 +55,10 @@ public static class TelemetryParser
         var hasRssi = false;
         var hasSeq = false;
         var hasSuccess = false;
+        var hasPackets = false;
+        var packets = 0;
+        var rssiAvg = 0.0;
+        List<RfScanTopMac>? topMacs = null;
 
         // I/Q reduction state — mean of sqrt(i^2 + q^2) over pairs.
         double magnitudeSum = 0;
@@ -80,6 +87,7 @@ public static class TelemetryParser
                     else if (reader.ValueTextEquals("ack"u8)) kind = TelemetryKind.Ack;
                     else if (reader.ValueTextEquals("config"u8)) kind = TelemetryKind.Config;
                     else if (reader.ValueTextEquals("hb"u8)) kind = TelemetryKind.Heartbeat;
+                    else if (reader.ValueTextEquals("rf_scan"u8)) kind = TelemetryKind.RfScan;
                     else return false; // imu, diag — not our concern
                 }
                 else if (reader.ValueTextEquals("mac"u8))
@@ -155,6 +163,69 @@ public static class TelemetryParser
 
                     reason = reader.GetString();
                 }
+                else if (reader.ValueTextEquals("packets"u8))
+                {
+                    if (!reader.Read() || !reader.TryGetInt32(out packets))
+                    {
+                        return false;
+                    }
+
+                    hasPackets = true;
+                }
+                else if (reader.ValueTextEquals("rssi_avg"u8))
+                {
+                    if (!reader.Read() || !reader.TryGetDouble(out rssiAvg))
+                    {
+                        return false;
+                    }
+                }
+                else if (reader.ValueTextEquals("top_macs"u8))
+                {
+                    // Array of {mac, packets, ...} — collect MAC + packet pairs.
+                    while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+                    {
+                        if (reader.TokenType != JsonTokenType.StartObject)
+                        {
+                            continue;
+                        }
+
+                        MacAddress topMac = default;
+                        var topPackets = 0;
+                        var haveTopMac = false;
+                        while (reader.Read() && reader.TokenType != JsonTokenType.EndObject)
+                        {
+                            if (reader.TokenType != JsonTokenType.PropertyName)
+                            {
+                                continue;
+                            }
+
+                            if (reader.ValueTextEquals("mac"u8))
+                            {
+                                if (reader.Read() && reader.TokenType == JsonTokenType.String
+                                    && MacAddress.TryParse(reader.ValueSpan, out topMac))
+                                {
+                                    haveTopMac = true;
+                                }
+                            }
+                            else if (reader.ValueTextEquals("packets"u8))
+                            {
+                                if (reader.Read())
+                                {
+                                    reader.TryGetInt32(out topPackets);
+                                }
+                            }
+                            else
+                            {
+                                reader.Skip();
+                            }
+                        }
+
+                        if (haveTopMac)
+                        {
+                            (topMacs ??= new List<RfScanTopMac>()).Add(new RfScanTopMac(topMac, topPackets));
+                        }
+                    }
+                }
                 else if (reader.ValueTextEquals("c"u8))
                 {
                     // Stream the I/Q array — reduce to mean magnitude inline.
@@ -224,6 +295,19 @@ public static class TelemetryParser
                 {
                     Kind = TelemetryKind.Heartbeat,
                     AnnouncedMac = mac,
+                };
+                return true;
+
+            case TelemetryKind.RfScan when hasMac && hasChannel && hasPackets:
+                result = new ParsedTelemetry
+                {
+                    Kind = TelemetryKind.RfScan,
+                    Scan = new RfScanReport(
+                        mac,
+                        channel,
+                        packets,
+                        rssiAvg,
+                        topMacs?.ToImmutableArray() ?? ImmutableArray<RfScanTopMac>.Empty),
                 };
                 return true;
 

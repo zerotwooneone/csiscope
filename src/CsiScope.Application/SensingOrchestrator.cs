@@ -165,6 +165,35 @@ public sealed class SensingOrchestrator
     }
 
     /// <summary>
+    /// Spectrum-scan result — the survey's only signal. A DIAG_RF dwell emits
+    /// no CSI, so this is how channel activity and candidate MACs enter the
+    /// environment map: packets feed the channel's activity score, top_macs
+    /// seed the acquisition filter.
+    /// </summary>
+    public void OnRfScanReceived(in RfScanReport report, DateTimeOffset now)
+    {
+        // A node producing telemetry is alive.
+        _expectedNodes.Add(report.Node);
+        _nodeLastSeen[report.Node] = now;
+
+        if (!_activity.TryGetValue(report.Channel, out var activity))
+        {
+            activity = new ChannelActivity(report.Channel, now);
+            _activity.Add(report.Channel, activity);
+        }
+
+        activity.RecordScan(report.Packets, report.TopMacs.Length > 0 ? report.TopMacs[0].Mac : default, now);
+
+        // Candidate MACs for the acquisition filter — the scan's top talkers.
+        foreach (var top in report.TopMacs)
+        {
+            _macTotals[top.Mac] = _macTotals.TryGetValue(top.Mac, out var e)
+                ? (e.Count + top.Packets, now)
+                : (top.Packets, now);
+        }
+    }
+
+    /// <summary>
     /// One orchestration step, driven by an external timer. Advances any
     /// in-progress multi-step plan (survey sweep or audit); otherwise builds
     /// the context snapshot, runs the pure policy, applies the decision to

@@ -170,9 +170,15 @@ public sealed class SensingHostWorker : BackgroundService
             window.CancelAfter(_tickInterval);
             try
             {
-                while (await _ingress.Reader.WaitToReadAsync(window.Token))
+                // WaitToReadAsync returns true whenever an item is available and
+                // does NOT observe the window token in that case — a sustained
+                // frame flood would starve the tick. Bound the drain by the
+                // window ourselves so the orchestrator always runs on cadence.
+                while (!window.IsCancellationRequested
+                       && await _ingress.Reader.WaitToReadAsync(window.Token))
                 {
-                    while (_ingress.Reader.TryRead(out var item))
+                    while (!window.IsCancellationRequested
+                           && _ingress.Reader.TryRead(out var item))
                     {
                         Dispatch(in item);
                     }
@@ -182,16 +188,28 @@ public sealed class SensingHostWorker : BackgroundService
             {
                 // window elapsed — fall through to tick
             }
+            catch (Exception ex)
+            {
+                // A dispatch fault must not kill the single-writer loop — log and tick on.
+                _logger?.LogError(ex, "Sensing ingest dispatch failed");
+            }
 
             var now = _time.GetUtcNow();
-            _orchestrator.Tick(now);
-
-            // Throttled projection — the UI polls at ~3Hz; snapshotting every
-            // 100ms tick would triple the allocation rate for no benefit.
-            if (now - _lastSnapshotAt >= SnapshotInterval)
+            try
             {
-                _lastSnapshotAt = now;
-                Volatile.Write(ref _latestSnapshot, _orchestrator.CreateSnapshot(now));
+                _orchestrator.Tick(now);
+
+                // Throttled projection — the UI polls at ~3Hz; snapshotting every
+                // 100ms tick would triple the allocation rate for no benefit.
+                if (now - _lastSnapshotAt >= SnapshotInterval)
+                {
+                    _lastSnapshotAt = now;
+                    Volatile.Write(ref _latestSnapshot, _orchestrator.CreateSnapshot(now));
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Sensing tick failed");
             }
         }
     }
@@ -218,6 +236,9 @@ public sealed class SensingHostWorker : BackgroundService
                 break;
             case TelemetryKind.Heartbeat:
                 _orchestrator.OnNodeHeartbeat(item.Frame.AnnouncedMac, now);
+                break;
+            case TelemetryKind.RfScan:
+                _orchestrator.OnRfScanReceived(item.Frame.Scan, now);
                 break;
         }
     }

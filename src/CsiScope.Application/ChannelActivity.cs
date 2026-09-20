@@ -43,6 +43,30 @@ internal sealed class ChannelActivity
         }
     }
 
+    /// <summary>
+    /// Fold a spectrum-scan dwell into the activity record — the scan reports a
+    /// packet total (not per-frame events), so Frames jumps by the dwell count
+    /// and the loudest transmitter becomes the channel's top MAC.
+    /// </summary>
+    public void RecordScan(int packets, MacAddress topMac, DateTimeOffset at)
+    {
+        Frames += packets;
+        LastFrameAt = at;
+
+        if (topMac == default)
+        {
+            return;
+        }
+
+        int count = _macCounts.TryGetValue(topMac, out var existing) ? existing + packets : packets;
+        _macCounts[topMac] = count;
+        if (count > _topCount)
+        {
+            _topCount = count;
+            TopMac = topMac;
+        }
+    }
+
     public double Pps(DateTimeOffset now)
     {
         double seconds = (now - WindowStartedAt).TotalSeconds;
