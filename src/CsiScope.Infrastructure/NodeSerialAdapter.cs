@@ -24,7 +24,11 @@ namespace CsiScope.Infrastructure;
 public sealed class NodeSerialAdapter : IAsyncDisposable
 {
     private const int QueueCapacity = 32;
-    private const int ScanDwellMs = 5000; // firmware max; host re-commands sooner
+    // Must stay below the host's per-channel hop interval (SurveyDwell = 500ms):
+    // each set_rf re-command calls resetMetrics() which restarts the dwell clock,
+    // so a dwell longer than the hop interval never elapses and emitMetrics()
+    // (rf_scan) never fires. 250ms completes + emits with margin before the next hop.
+    private const int ScanDwellMs = 250;
 
     private readonly Func<ReadOnlyMemory<byte>, CancellationToken, ValueTask> _writeAsync;
     private readonly TimeProvider _time;
